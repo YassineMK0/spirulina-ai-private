@@ -1,0 +1,22 @@
+# Environment — NEVER commit API keys
+.env
+.env.*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# Test artifacts
+data/processed/rag_eval_results.json
+
+# OS
+.DS_Store
+Thumbs.db
