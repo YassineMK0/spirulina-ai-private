@@ -36,6 +36,8 @@ from langchain_core.prompts import ChatPromptTemplate
 
 GENERATOR_PROVIDER  = os.getenv("GENERATOR_MODEL_PROVIDER", "groq")
 GENERATOR_MODEL     = os.getenv("GENERATOR_MODEL_NAME",     "llama-3.3-70b-versatile")
+REASONING_MODEL     = os.getenv("REASONING_MODEL_NAME",     "nvidia/nemotron-3-super-120b-a12b:free")
+OPENROUTER_API_KEY  = os.getenv("OPENROUTER_API_KEY", "")
 HISTORY_WINDOW      = 6   # number of recent messages included in context
 
 
@@ -211,12 +213,16 @@ def _get_llm():
         from langchain_groq import ChatGroq
         return ChatGroq(
             model=GENERATOR_MODEL,
-            temperature=0.2,      # slight warmth — more natural, still grounded
+            temperature=0.2,
             max_tokens=1024,
         )
-    if provider == "openai":
+    if provider in ("openai", "openrouter"):
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=GENERATOR_MODEL, temperature=0.2, max_tokens=1024)
+        kwargs = {"model": GENERATOR_MODEL, "temperature": 0.2, "max_tokens": 1024}
+        if provider == "openrouter":
+            kwargs["api_key"] = OPENROUTER_API_KEY
+            kwargs["base_url"] = "https://openrouter.ai/api/v1"
+        return ChatOpenAI(**kwargs)
     if provider == "huggingface":
         from langchain_huggingface import HuggingFaceEndpoint
         return HuggingFaceEndpoint(
@@ -274,6 +280,93 @@ _NO_CONTEXT_ANSWER = (
 
 
 # ---------------------------------------------------------------------------
+# Reasoning agent — DeepSeek R1 (HARVEST + SYSTEM intents)
+# ---------------------------------------------------------------------------
+
+_REASONING_SYSTEM_PROMPT = """\
+You are SpirulinaAI — a spirulina cultivation expert giving advice to a \
+container owner who may not have a scientific background.
+
+You receive sensor readings and possibly a question. Your job is to give \
+a short, plain-language response that the owner can act on immediately.
+
+## Output format — always follow this structure:
+
+**Situation** (1-2 sentences max)
+What is happening with the culture right now, in plain terms.
+
+**What to do** (bullet points, 2-3 actions max)
+Concrete steps the owner should take today, in priority order.
+Use simple language — no formulas, no equations, no Latin names.
+
+**If nothing is done** (1 sentence)
+What will happen to the culture and the product within the next 24-48 h.
+
+## Rules
+- Never use tables or parameter breakdowns — the owner already sees the dashboard
+- Never explain the biology unless the owner specifically asks why
+- Never give exact chemical doses without knowing the current sensor values
+- Keep the whole response under 150 words
+- If the situation is critical (status=error, multiple anomalies), say so clearly \
+  and recommend contacting a specialist immediately
+- Tone: like a trusted friend who knows spirulina — calm, direct, caring
+"""
+
+_REASONING_HUMAN_TEMPLATE = """\
+<sensor_readings>
+{sensor_block}
+</sensor_readings>
+
+{ml_block}\
+<knowledge_base>
+{context}
+</knowledge_base>
+
+<conversation_history>
+{history_text}
+</conversation_history>
+
+Question: {question}
+
+Give a short, plain-language response the owner can act on right now.\
+"""
+
+_REASONING_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", _REASONING_SYSTEM_PROMPT),
+    ("human",  _REASONING_HUMAN_TEMPLATE),
+])
+
+
+# ---------------------------------------------------------------------------
+# Reasoning LLM singleton (OpenRouter — Qwen3 80B with native thinking mode)
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def _get_reasoning_llm():
+    from langchain_openai import ChatOpenAI
+    return ChatOpenAI(
+        model=REASONING_MODEL,
+        api_key=OPENROUTER_API_KEY,
+        base_url="https://openrouter.ai/api/v1",
+        temperature=0.1,   # low temp — consistent reasoning
+        max_tokens=2048,   # R1 needs room for chain-of-thought
+    )
+
+
+@lru_cache(maxsize=1)
+def get_reasoning_chain():
+    """Return the compiled reasoning chain (cached singleton)."""
+    return _REASONING_PROMPT | _get_reasoning_llm() | StrOutputParser()
+
+
+import re as _re
+
+def _strip_think_tags(text: str) -> str:
+    """Remove DeepSeek R1 <think>...</think> reasoning block from output."""
+    return _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -319,4 +412,47 @@ def generate_answer(
         return (
             f"I encountered an error while generating the answer: {exc}. "
             f"Please check the generator configuration and try again."
+        )
+
+
+def reasoning_generate(
+    question: str,
+    context: str,
+    history: list[dict] | None = None,
+    sensor_state: dict[str, Any] | None = None,
+    ml_outputs: dict[str, Any] | None = None,
+) -> str:
+    """Generate a step-by-step analysis using DeepSeek R1.
+
+    Used for HARVEST and SYSTEM intents where structured reasoning over
+    sensor data and ML outputs matters more than fluent prose.
+
+    Strips <think>...</think> tags from R1 output before returning.
+    """
+    if not question.strip():
+        return "Please ask a question about Spirulina cultivation."
+
+    if not context or not context.strip():
+        return _NO_CONTEXT_ANSWER
+
+    chain = get_reasoning_chain()
+
+    # Format sensor block without XML tags — reasoning prompt owns the structure
+    sensor_text = "\n".join(f"{k}: {v}" for k, v in (sensor_state or {}).items()) or "No sensor data available."
+    ml_text     = "\n".join(f"{k}: {v}" for k, v in (ml_outputs  or {}).items()) or ""
+    ml_block    = f"<ml_predictions>\n{ml_text}\n</ml_predictions>\n\n" if ml_text else ""
+
+    try:
+        raw = chain.invoke({
+            "context":      context,
+            "question":     question,
+            "history_text": _format_history(history or []),
+            "sensor_block": sensor_text,
+            "ml_block":     ml_block,
+        })
+        return _strip_think_tags(raw)
+    except Exception as exc:
+        return (
+            f"Reasoning engine error: {exc}. "
+            f"Please check the REASONING_MODEL_NAME configuration."
         )

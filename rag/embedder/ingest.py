@@ -37,7 +37,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 RAW_DIR        = Path(os.getenv("RAW_DATA_DIR",      "data/raw"))
 CHROMA_DIR     = Path(os.getenv("CHROMA_PERSIST_DIR", "data/processed/chroma"))
 COLLECTION_NAME = "spirulina_kb"
-EMBED_MODEL    = "paraphrase-multilingual-MiniLM-L12-v2"
+EMBED_MODEL    = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
 
 CHUNK_SIZE    = 500
 CHUNK_OVERLAP = 50
@@ -398,6 +398,20 @@ def ingest(
     chroma_dir.mkdir(parents=True, exist_ok=True)
     ef = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
     client = chromadb.PersistentClient(path=str(chroma_dir))
+
+    # Drop and recreate the collection if the embedding dimension changed
+    existing_names = [c.name for c in client.list_collections()]
+    if collection_name in existing_names:
+        existing = client.get_collection(name=collection_name, embedding_function=ef)
+        sample = existing.get(limit=1, include=["embeddings"])
+        if sample["embeddings"] and len(sample["embeddings"][0]) != len(ef(["test"])[0]):
+            if verbose:
+                old_dim = len(sample["embeddings"][0])
+                new_dim = len(ef(["test"])[0])
+                print(f"  [warn] Embedding dimension changed ({old_dim} -> {new_dim}).")
+                print(f"         Dropping and recreating collection '{collection_name}'...")
+            client.delete_collection(name=collection_name)
+
     collection = client.get_or_create_collection(
         name=collection_name,
         embedding_function=ef,

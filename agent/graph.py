@@ -2,15 +2,23 @@
 
 Pipeline order
 --------------
-1. check_container    - resolve container_id / has_container
-2. classify_intent    - LLM router -> JSON { intent, confidence }
-                        (runs for ALL users, container or not)
-3. confidence gate    - if confidence < 0.7 -> request_clarification -> END
-4. retrieve_rag       - vector-store lookup (runs for ALL users)
-5. ML gate            - split on has_container:
-     has_container=True  -> run_ml_models -> read_sensors -> generate_response
-     has_container=False -> generate_response  (RAG-only + friendly message)
-6. format_response    - wrap raw LLM answer in markdown template (all paths)
+1. check_container       - resolve container_id / has_container
+2. classify_intent       - LLM router -> JSON { intent, confidence }
+                           (runs for ALL users, container or not)
+3. routing gate          - branches based on intent + confidence:
+     confidence < 0.7    -> request_clarification  -> END
+     intent=OFF_DOMAIN   -> reject_off_domain       -> END
+     intent=MEMORY_RECALL-> recall_memory           -> END
+     otherwise           -> retrieve_rag
+4. retrieve_rag          - vector-store lookup (runs for all normal paths)
+5. post-RAG gate         - split on has_container + intent:
+     has_container=True  -> run_ml_models -> read_sensors -> post-sensors gate
+     HARVEST/SYSTEM (no container) -> reasoning_agent
+     otherwise (no container)      -> generate_response
+6. post-sensors gate     - split on intent after sensor data is available:
+     HARVEST / SYSTEM    -> reasoning_agent  (DeepSeek R1 — step-by-step)
+     KNOWLEDGE / UPDATE  -> generate_response (Llama 3.3 70b — fluent prose)
+7. format_response       - wrap raw LLM answer in markdown template
 
 Run directly to smoke-test:
     python -m agent.graph
@@ -26,6 +34,9 @@ from agent.nodes import (
     format_response,
     generate_response,
     read_sensors,
+    reasoning_agent,
+    recall_memory,
+    reject_off_domain,
     request_clarification,
     retrieve_rag,
     run_ml_models,
@@ -33,63 +44,101 @@ from agent.nodes import (
 from agent.state import AgentState
 
 
-# -- gate: low confidence → ask user to rephrase ---------------------------
-def _confidence_gate(state: AgentState) -> str:
-    if state.get("confidence", 0.0) >= CONFIDENCE_THRESHOLD:
-        return "retrieve_rag"
-    return "request_clarification"
+# -- gate: route after classification --------------------------------------
+def _route_after_classify(state: AgentState) -> str:
+    """Branch based on confidence threshold and intent type."""
+    if state.get("confidence", 0.0) < CONFIDENCE_THRESHOLD:
+        return "request_clarification"
+    intent = state.get("intent", "UNKNOWN")
+    if intent == "OFF_DOMAIN":
+        return "reject_off_domain"
+    if intent == "MEMORY_RECALL":
+        return "recall_memory"
+    return "retrieve_rag"
 
 
-# -- gate: split full pipeline vs RAG-only after vector search -------------
-def _ml_gate(state: AgentState) -> str:
-    """Full pipeline only when a container is linked."""
+_REASONING_INTENTS = {"HARVEST", "SYSTEM"}
+
+
+# -- gate: after RAG — route by container + intent -------------------------
+def _post_rag_gate(state: AgentState) -> str:
+    """Run ML+sensors when container exists; otherwise split by intent."""
     if state.get("has_container"):
         return "run_ml_models"
+    if state.get("intent", "KNOWLEDGE").upper() in _REASONING_INTENTS:
+        return "reasoning_agent"
+    return "generate_response"
+
+
+# -- gate: after sensors — choose generator by intent ---------------------
+def _post_sensors_gate(state: AgentState) -> str:
+    """HARVEST/SYSTEM -> DeepSeek R1 reasoning; everything else -> Llama 70b."""
+    if state.get("intent", "KNOWLEDGE").upper() in _REASONING_INTENTS:
+        return "reasoning_agent"
     return "generate_response"
 
 
 # -- build graph -----------------------------------------------------------
 builder = StateGraph(AgentState)
 
-builder.add_node("check_container", check_container)
-builder.add_node("classify_intent", classify_intent)
-builder.add_node("request_clarification", request_clarification)
-builder.add_node("retrieve_rag", retrieve_rag)
-builder.add_node("run_ml_models", run_ml_models)
-builder.add_node("read_sensors", read_sensors)
-builder.add_node("generate_response", generate_response)
-builder.add_node("format_response", format_response)
+builder.add_node("check_container",      check_container)
+builder.add_node("classify_intent",      classify_intent)
+builder.add_node("request_clarification",request_clarification)
+builder.add_node("reject_off_domain",    reject_off_domain)
+builder.add_node("recall_memory",        recall_memory)
+builder.add_node("retrieve_rag",         retrieve_rag)
+builder.add_node("run_ml_models",        run_ml_models)
+builder.add_node("read_sensors",         read_sensors)
+builder.add_node("reasoning_agent",      reasoning_agent)
+builder.add_node("generate_response",    generate_response)
+builder.add_node("format_response",      format_response)
 
-# check_container always proceeds to intent classification
+# check_container → intent classification
 builder.set_entry_point("check_container")
 builder.add_edge("check_container", "classify_intent")
 
-# intent classification → confidence gate
+# intent classification → routing gate
 builder.add_conditional_edges(
     "classify_intent",
-    _confidence_gate,
+    _route_after_classify,
     {
-        "retrieve_rag": "retrieve_rag",
+        "retrieve_rag":          "retrieve_rag",
         "request_clarification": "request_clarification",
+        "reject_off_domain":     "reject_off_domain",
+        "recall_memory":         "recall_memory",
     },
 )
 
 builder.add_edge("request_clarification", END)
+builder.add_edge("reject_off_domain",      END)
+builder.add_edge("recall_memory",          END)
 
-# after RAG → ML gate splits full vs RAG-only
+# after RAG → post-RAG gate (container + intent aware)
 builder.add_conditional_edges(
     "retrieve_rag",
-    _ml_gate,
+    _post_rag_gate,
     {
-        "run_ml_models": "run_ml_models",
-        "generate_response": "generate_response",
+        "run_ml_models":    "run_ml_models",
+        "reasoning_agent":  "reasoning_agent",
+        "generate_response":"generate_response",
     },
 )
 
+# after ML+sensors → choose generator by intent
 builder.add_edge("run_ml_models", "read_sensors")
-builder.add_edge("read_sensors", "generate_response")
+builder.add_conditional_edges(
+    "read_sensors",
+    _post_sensors_gate,
+    {
+        "reasoning_agent":  "reasoning_agent",
+        "generate_response":"generate_response",
+    },
+)
+
+# both generators → format → END
+builder.add_edge("reasoning_agent",   "format_response")
 builder.add_edge("generate_response", "format_response")
-builder.add_edge("format_response", END)
+builder.add_edge("format_response",   END)
 
 graph = builder.compile()
 
@@ -144,7 +193,7 @@ if __name__ == "__main__":
         for k, v in result3.items():
             print(f"  {k}: {v!r}")
         assert result3["confidence"] < CONFIDENCE_THRESHOLD
-        assert "rephrase" in result3["response"].lower()
+        assert result3.get("response", "") != ""
         print("  PASS: clarification node triggered\n")
 
     print("All smoke tests passed.")

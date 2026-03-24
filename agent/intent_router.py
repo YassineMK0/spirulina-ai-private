@@ -4,17 +4,16 @@ Runs after check_container has confirmed container_id in state.
 Returns { intent, confidence }. If confidence < 0.7 the graph routes
 to a clarification node instead of continuing the main pipeline.
 
-Supported providers (INTENT_MODEL_PROVIDER env var):
-  groq   -> Groq-hosted models (default)
-  openai -> GPT-4o-mini
-  ollama -> local Mistral-7B
+
 
 Intents
 -------
-KNOWLEDGE  - factual / how-to question     -> RAG pipeline
-UPDATE     - change container parameters    -> write path
-HARVEST    - harvest timing / readiness     -> ML models
-SYSTEM     - device status, alerts, errors  -> sensor / diagnostics path
+KNOWLEDGE     - factual / how-to question        -> RAG pipeline
+UPDATE        - change container parameters       -> write path
+HARVEST       - harvest timing / readiness        -> ML models
+SYSTEM        - device status, alerts, errors     -> sensor / diagnostics path
+OFF_DOMAIN    - unrelated to spirulina            -> polite redirect
+MEMORY_RECALL - asking about past conversation   -> memory recall node
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ from langchain_core.output_parsers import StrOutputParser
 from agent.state import AgentState
 
 # -- valid intents ---------------------------------------------------------
-VALID_INTENTS = {"KNOWLEDGE", "UPDATE", "HARVEST", "SYSTEM"}
+VALID_INTENTS = {"KNOWLEDGE", "UPDATE", "HARVEST", "SYSTEM", "OFF_DOMAIN", "MEMORY_RECALL"}
 
 CONFIDENCE_THRESHOLD = 0.7
 
@@ -41,15 +40,28 @@ Given the user's latest message, respond with a JSON object containing
 exactly two keys: "intent" and "confidence".
 
 Intent labels (pick ONE):
-  KNOWLEDGE - the user asks a factual, how-to, or general-knowledge question
-              about spirulina cultivation (pH, nutrients, light, temperature, etc.).
-  UPDATE    - the user wants to change, set, or adjust a container parameter
-              (e.g. "set pH to 9.5", "turn on the light", "change temperature").
-  HARVEST   - the user asks about harvest timing, readiness, biomass density,
-              or wants to trigger / schedule a harvest.
-  SYSTEM    - the user asks about device status, sensor readings, connectivity,
-              error logs, alerts, or system health (e.g. "is the pump running?",
-              "show me sensor errors", "what's the system status?").
+  KNOWLEDGE     - the user asks a factual, how-to, or general-knowledge question
+                  about spirulina cultivation (pH, nutrients, light, temperature, etc.).
+  UPDATE        - the user wants to change, set, or adjust a container parameter
+                  (e.g. "set pH to 9.5", "turn on the light", "change temperature").
+  HARVEST       - the user asks about harvest timing, readiness, biomass density,
+                  or wants to trigger / schedule a harvest.
+  SYSTEM        - the user asks about device status, sensor readings, connectivity,
+                  error logs, alerts, or system health (e.g. "is the pump running?",
+                  "show me sensor errors", "what's the system status?").
+  OFF_DOMAIN    - the question is CLEARLY and OBVIOUSLY unrelated to spirulina,
+                  algae, aquaculture, farming, biology, or this platform.
+                  Examples: "who won the World Cup?", "write me a poem", "what is 2+2".
+                  DO NOT use OFF_DOMAIN for:
+                    - greetings or small talk ("hello", "hi", "thanks") -> use KNOWLEDGE
+                    - questions about this app / platform / system -> use KNOWLEDGE or SYSTEM
+                    - questions about algae, microalgae, or any related biology -> use KNOWLEDGE
+                    - anything that could plausibly relate to cultivation -> use KNOWLEDGE
+                  When in doubt, prefer KNOWLEDGE over OFF_DOMAIN.
+  MEMORY_RECALL - the user is asking to recall a previous message, past topic, or
+                  their conversation history (e.g. "what did we discuss?",
+                  "what was my last question?", "remind me what you said about pH",
+                  "show me our conversation", "what did I ask before?").
 
 Confidence is a float between 0.0 and 1.0 reflecting how certain you are.
 
@@ -150,7 +162,7 @@ def _parse_response(raw: str) -> tuple[str, float]:
     return (intent, confidence)
 
 
-# -- chain (lazy-initialised once) -----------------------------------------
+# -- chain (lazy-initialised once, reset when prompt changes) --------------
 _chain = None
 
 
@@ -159,6 +171,12 @@ def _get_chain():
     if _chain is None:
         _chain = INTENT_PROMPT | _get_llm() | StrOutputParser()
     return _chain
+
+
+def reset_chain():
+    """Force rebuild of the chain (call after updating INTENT_SYSTEM_PROMPT at runtime)."""
+    global _chain
+    _chain = None
 
 
 # -- public node function --------------------------------------------------

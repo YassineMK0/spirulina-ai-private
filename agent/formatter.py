@@ -137,8 +137,11 @@ def template_rag_answer(answer: str, rag_context: str = "") -> str:
     sources = _extract_sources(rag_context)
     footer = ""
     if sources:
-        source_list = " · ".join(f"`{s}`" for s in sources[:4])
-        footer = f"\n\n---\n *Sources: {source_list}*"
+        source_list = " · ".join(
+            f'<span style="color:#52b788;font-style:italic">{s}</span>'
+            for s in sources[:4]
+        )
+        footer = f"\n\n---\n <small>Sources: {source_list}</small>"
     return answer + footer
 
 
@@ -369,6 +372,17 @@ def format_message(
 
     # ── LLM answer (always last, sources appended) ───────────────────────────
     answer_block = template_rag_answer(raw_answer, rag_context)
+
+    # Edge case 2 — no container linked for an intent that benefits from one.
+    # Append a one-line tip so the user knows how to unlock sensor/ML features.
+    if not has_container and intent in ("UPDATE", "HARVEST", "SYSTEM"):
+        container_tip = (
+            "\n\n---\n"
+            "_💡 **No container linked.** Enter your Container ID to enable "
+            "real-time sensor monitoring, ML predictions, and container control._"
+        )
+        answer_block = (answer_block or "") + container_tip
+
     if answer_block:
         parts.append(answer_block)
 

@@ -338,6 +338,59 @@
       transition: background .2s;
     }
     .chip:hover { background: var(--green-accent); color: #fff; border-color: var(--green-accent); }
+
+    /* ── Alert bubble (proactive monitor) ───────────────────────────────── */
+    .alert-bubble {
+      align-self: flex-start;
+      max-width: 720px;
+      width: 100%;
+      animation: slideIn .3s ease;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .alert-inner {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 14px 16px;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      border-left: 4px solid;
+    }
+
+    .alert-inner.critical {
+      background: #fff5f5;
+      border-color: #ef4444;
+      color: #7f1d1d;
+    }
+
+    .alert-inner.warning {
+      background: #fffbeb;
+      border-color: #f59e0b;
+      color: #78350f;
+    }
+
+    .alert-inner.harvest {
+      background: #f0fdf4;
+      border-color: #22c55e;
+      color: #14532d;
+    }
+
+    .alert-icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+    .alert-body { flex: 1; line-height: 1.5; font-size: 14px; }
+    .alert-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: .8px;
+      text-transform: uppercase;
+      opacity: .7;
+      margin-bottom: 4px;
+    }
+    .alert-meta { font-size: 11px; opacity: .6; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -349,7 +402,10 @@
     <div class="title">SpirulinaAI</div>
     <div class="subtitle">Intelligent cultivation assistant</div>
   </div>
-  <div class="status-dot" id="status-dot" title="API online"></div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:14px;">
+    <span id="user-badge" style="font-size:12px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:3px 12px;color:#c8f0d8;">Guest</span>
+    <div class="status-dot" id="status-dot" title="API online"></div>
+  </div>
 </header>
 
 <!-- ── Config bar ──────────────────────────────────────────────────────── -->
@@ -357,6 +413,7 @@
   <label>Container ID:</label>
   <input id="container-id" type="text" placeholder="Leave empty for general Q&A" />
   <span class="hint">Optional — link a container to enable sensor monitoring</span>
+  <button onclick="clearHistory()" style="margin-left:auto;background:transparent;border:1px solid #d0e8da;color:#6b8f7a;border-radius:8px;padding:4px 12px;font-size:12px;cursor:pointer;">Clear chat</button>
 </div>
 
 <!-- ── Chat window ─────────────────────────────────────────────────────── -->
@@ -387,21 +444,44 @@
   const inputEl    = document.getElementById("input");
   const sendBtn    = document.getElementById("send-btn");
   const statusDot  = document.getElementById("status-dot");
+  const userBadge  = document.getElementById("user-badge");
 
-  // Chat history sent to the backend (grows as user chats)
-  let chatHistory = [];
+  // Platform sets: localStorage.setItem("spirulina_user_id", userId) after login.
+  // Fallback: URL param ?uid=xxx, then "anonymous".
+  function getUserId() {
+    return localStorage.getItem("spirulina_user_id")
+        || new URLSearchParams(window.location.search).get("uid")
+        || "anonymous";
+  }
+  const USER_ID = getUserId();
+  userBadge.textContent = USER_ID === "anonymous" ? "Guest" : "\uD83D\uDC64 " + USER_ID;
 
-  // ── Markdown renderer (marked.js) ────────────────────────────────────
   marked.setOptions({ breaks: true, gfm: true });
 
-  // ── Check API health on load ──────────────────────────────────────────
-  fetch(`${API}/health`)
-    .then(r => r.ok ? null : Promise.reject())
-    .catch(() => {
+  // ── On load: health check + restore history from Redis ─────────────────
+  window.addEventListener("load", async () => {
+    try {
+      const r = await fetch(`${API}/health`);
+      if (!r.ok) throw new Error();
+    } catch {
       statusDot.style.background = "#ff4444";
       statusDot.style.boxShadow  = "0 0 6px #ff4444";
       statusDot.title = "API offline — start uvicorn first";
-    });
+      return;
+    }
+    try {
+      const r = await fetch(`${API}/history/${USER_ID}`);
+      const history = await r.json();
+      if (history.length > 0) {
+        document.getElementById("welcome")?.remove();
+        history.forEach(msg => {
+          if (msg.role === "user") appendUser(msg.content, false);
+          else                     appendBot(msg.content, "", 0, false);
+        });
+        scrollBottom();
+      }
+    } catch { /* start fresh */ }
+  });
 
   // ── Helpers ───────────────────────────────────────────────────────────
   function now() {
@@ -427,19 +507,19 @@
   }
 
   // ── Append a user bubble ──────────────────────────────────────────────
-  function appendUser(text) {
+  function appendUser(text, showTime = true) {
     document.getElementById("welcome")?.remove();
     const row = document.createElement("div");
     row.className = "msg-row user";
     row.innerHTML = `
       <div>
         <div class="bubble">${escapeHtml(text)}</div>
-        <div class="msg-meta">${now()}</div>
+        ${showTime ? `<div class="msg-meta">${now()}</div>` : ""}
       </div>
       <div class="avatar">👤</div>
     `;
     chatWindow.appendChild(row);
-    scrollBottom();
+    if (showTime) scrollBottom();
   }
 
   // ── Append typing indicator ───────────────────────────────────────────
@@ -458,7 +538,7 @@
   }
 
   // ── Replace typing indicator with bot response ────────────────────────
-  function appendBot(text, intent, confidence) {
+  function appendBot(text, intent, confidence, showTime = true) {
     document.getElementById("typing-row")?.remove();
 
     const badge = intent
@@ -472,11 +552,11 @@
       <div>
         ${badge}
         <div class="bubble">${marked.parse(text)}</div>
-        <div class="msg-meta">${now()}${confidence ? ` · ${(confidence*100).toFixed(0)}% confidence` : ""}</div>
+        ${showTime ? `<div class="msg-meta">${now()}${confidence ? " · " + (confidence*100).toFixed(0) + "% confidence" : ""}</div>` : ""}
       </div>
     `;
     chatWindow.appendChild(row);
-    scrollBottom();
+    if (showTime) scrollBottom();
   }
 
   // ── Append error bubble ───────────────────────────────────────────────
@@ -498,52 +578,108 @@
     return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   }
 
+  // ── Clear history ─────────────────────────────────────────────────────
+  async function clearHistory() {
+    if (!confirm("Clear your chat history?")) return;
+    await fetch(`${API}/history/${USER_ID}`, { method: "DELETE" });
+    location.reload();
+  }
+
   // ── Main send ─────────────────────────────────────────────────────────
   async function sendMessage() {
     const text = inputEl.value.trim();
     if (!text || sendBtn.disabled) return;
 
-    // Reset input
     inputEl.value = "";
     inputEl.style.height = "auto";
     sendBtn.disabled = true;
 
     appendUser(text);
-    const typingRow = appendTyping();
+    appendTyping();
 
     try {
       const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message:       text,
-          user_id:       "demo-user",
-          container_id:  document.getElementById("container-id").value.trim(),
-          chat_history:  chatHistory,
+          message:      text,
+          user_id:      USER_ID,
+          container_id: document.getElementById("container-id").value.trim(),
         }),
       });
 
       if (!res.ok) {
-        const err = await res.text();
-        appendError(`Server error ${res.status}: ${err}`);
+        appendError(`Server error ${res.status}: ${await res.text()}`);
       } else {
         const data = await res.json();
         appendBot(data.response, data.intent, data.confidence);
-
-        // Update local history for context continuity
-        chatHistory.push({ role: "user",      content: text          });
-        chatHistory.push({ role: "assistant",  content: data.response });
-
-        // Keep history bounded to last 20 messages (10 turns)
-        if (chatHistory.length > 20) chatHistory = chatHistory.slice(-20);
       }
-    } catch (e) {
-      appendError("Could not reach the API. Make sure the backend is running:\n.venv\\Scripts\\uvicorn api.main:app --reload --port 8000");
+    } catch {
+      appendError("Could not reach the API. Start it with:\n.venv\\Scripts\\uvicorn api.main:app --reload --port 8000");
     }
 
     sendBtn.disabled = false;
     inputEl.focus();
   }
+
+  // ── Proactive alerts via SSE ──────────────────────────────────────────
+  function severityFromText(text) {
+    if (text.includes("🚨") || text.toLowerCase().includes("critical")) return "critical";
+    if (text.includes("🌾") || text.toLowerCase().includes("harvest"))  return "harvest";
+    return "warning";
+  }
+
+  function appendAlert(text) {
+    document.getElementById("welcome")?.remove();
+    const severity = severityFromText(text);
+    const icons    = { critical: "🚨", warning: "⚠️", harvest: "🌾" };
+    const labels   = { critical: "Critical Alert", warning: "Auto Alert", harvest: "Harvest Ready" };
+
+    const wrap = document.createElement("div");
+    wrap.className = "alert-bubble";
+    wrap.innerHTML = `
+      <div class="alert-inner ${severity}">
+        <div class="alert-icon">${icons[severity]}</div>
+        <div class="alert-body">
+          <div class="alert-label">${labels[severity]}</div>
+          <div>${marked.parse(text)}</div>
+          <div class="alert-meta">Auto-monitor · ${now()}</div>
+        </div>
+      </div>
+    `;
+    chatWindow.appendChild(wrap);
+    scrollBottom();
+
+    // Flash the status dot orange to draw attention
+    statusDot.style.background = severity === "critical" ? "#ef4444" : "#f59e0b";
+    statusDot.style.boxShadow  = `0 0 8px ${severity === "critical" ? "#ef4444" : "#f59e0b"}`;
+    setTimeout(() => {
+      statusDot.style.background = "#4aff8c";
+      statusDot.style.boxShadow  = "0 0 6px #4aff8c";
+    }, 5000);
+  }
+
+  function startAlertStream() {
+    const es = new EventSource(`${API}/alerts/${USER_ID}`);
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "alert" && data.text) appendAlert(data.text);
+      } catch { /* ignore malformed events */ }
+    };
+    es.onerror = () => {
+      // Reconnect automatically after 10s on error
+      es.close();
+      setTimeout(startAlertStream, 10000);
+    };
+  }
+
+  // Start SSE stream after health check passes
+  const _origLoad = window.onload;
+  window.addEventListener("load", () => {
+    // Give health check a moment to complete first
+    setTimeout(startAlertStream, 2000);
+  });
 </script>
 </body>
 </html>
