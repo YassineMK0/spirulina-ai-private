@@ -19,7 +19,31 @@ Expected schema (all keys optional — missing keys are treated as unavailable):
 from __future__ import annotations
 
 import random
+import time
 from datetime import datetime, timezone
+
+
+# ---------------------------------------------------------------------------
+# test-rotating — cycles through 6 anomaly states every 30 seconds
+# Used to verify the proactive alert pipeline end-to-end.
+# ---------------------------------------------------------------------------
+
+_ROTATING_INTERVAL = 30   # seconds per slot (match APScheduler interval)
+
+_ROTATING_SLOTS = [
+    {"ph": 9.5, "temperature_c": 33.0, "od680": 0.85, "conductivity_ms": 2.5,
+     "dissolved_o2_pct": 95.0, "light_lux": 10_000, "co2_ppm": 480, "status": "ok"},
+    {"ph": 7.2, "temperature_c": 32.0, "od680": 0.70, "conductivity_ms": 2.5,
+     "dissolved_o2_pct": 78.0, "light_lux": 9_500,  "co2_ppm": 720, "status": "warning"},
+    {"ph": 9.4, "temperature_c": 41.5, "od680": 0.60, "conductivity_ms": 2.8,
+     "dissolved_o2_pct": 65.0, "light_lux": 14_000, "co2_ppm": 390, "status": "warning"},
+    {"ph": 9.3, "temperature_c": 33.0, "od680": 0.55, "conductivity_ms": 4.8,
+     "dissolved_o2_pct": 80.0, "light_lux": 9_000,  "co2_ppm": 430, "status": "warning"},
+    {"ph": 7.8, "temperature_c": 40.0, "od680": 0.40, "conductivity_ms": 4.0,
+     "dissolved_o2_pct": 55.0, "light_lux": 13_000, "co2_ppm": 850, "status": "error"},
+    {"ph": 9.6, "temperature_c": 33.5, "od680": 1.15, "conductivity_ms": 2.8,
+     "dissolved_o2_pct": 98.0, "light_lux": 11_000, "co2_ppm": 460, "status": "ok"},
+]
 
 
 # ---------------------------------------------------------------------------
@@ -46,46 +70,53 @@ def get_sensor_reading(container_id: str) -> dict:
         # Healthy culture — all values in optimal range
         "test-healthy": {
             "ph": 9.5, "temperature_c": 33.0, "od680": 0.85,
-            "conductivity_ms": 20.0, "dissolved_o2_pct": 95.0,
+            "conductivity_ms": 2.5, "dissolved_o2_pct": 95.0,
             "light_lux": 10_000, "co2_ppm": 480,
             "timestamp": ts, "status": "ok",
         },
         # Harvest-ready — OD680 at upper optimal, stable for days
         "test-harvest-ready": {
             "ph": 9.6, "temperature_c": 33.5, "od680": 1.15,
-            "conductivity_ms": 21.0, "dissolved_o2_pct": 98.0,
+            "conductivity_ms": 2.8, "dissolved_o2_pct": 98.0,
             "light_lux": 11_000, "co2_ppm": 460,
             "timestamp": ts, "status": "ok",
         },
         # pH crash — dangerously low, needs bicarbonate addition
         "test-ph-crash": {
             "ph": 7.2, "temperature_c": 32.0, "od680": 0.70,
-            "conductivity_ms": 20.5, "dissolved_o2_pct": 78.0,
+            "conductivity_ms": 2.5, "dissolved_o2_pct": 78.0,
             "light_lux": 9_500, "co2_ppm": 720,
             "timestamp": ts, "status": "warning",
         },
         # Heat stress — temperature too high
         "test-heat-stress": {
             "ph": 9.4, "temperature_c": 41.5, "od680": 0.60,
-            "conductivity_ms": 23.0, "dissolved_o2_pct": 65.0,
+            "conductivity_ms": 2.8, "dissolved_o2_pct": 65.0,
             "light_lux": 14_000, "co2_ppm": 390,
             "timestamp": ts, "status": "warning",
         },
-        # Salt build-up — EC too high
+        # Salt build-up — EC too high (4.8 mS/cm = 4800 µS/cm)
         "test-high-ec": {
             "ph": 9.3, "temperature_c": 33.0, "od680": 0.55,
-            "conductivity_ms": 38.0, "dissolved_o2_pct": 80.0,
+            "conductivity_ms": 4.8, "dissolved_o2_pct": 80.0,
             "light_lux": 9_000, "co2_ppm": 430,
             "timestamp": ts, "status": "warning",
         },
         # Multiple anomalies — pH low + heat + low O2
         "test-multi-anomaly": {
             "ph": 7.8, "temperature_c": 40.0, "od680": 0.40,
-            "conductivity_ms": 28.0, "dissolved_o2_pct": 55.0,
+            "conductivity_ms": 4.0, "dissolved_o2_pct": 55.0,
             "light_lux": 13_000, "co2_ppm": 850,
             "timestamp": ts, "status": "error",
         },
     }
+
+    if container_id == "test-rotating":
+        slot = int(time.time()) // _ROTATING_INTERVAL % len(_ROTATING_SLOTS)
+        data = dict(_ROTATING_SLOTS[slot])
+        data["timestamp"] = ts
+        print(f"  [sensors] test-rotating slot {slot} -> status={data['status']}")
+        return data
 
     if container_id in _FAKE_CONTAINERS:
         return _FAKE_CONTAINERS[container_id]
@@ -102,6 +133,31 @@ def get_sensor_reading(container_id: str) -> dict:
         "co2_ppm":          round(rng.uniform(380, 600), 0),
         "timestamp":        datetime.now(timezone.utc).isoformat(),
         "status":           "ok",
+    }
+
+
+def sensor_to_ml_input(reading: dict) -> dict:
+    """Convert agent sensor schema to anomaly model input schema.
+
+    Agent schema              ML model schema
+    -----------------------------------------
+    ph                   ->   ph           (same)
+    temperature_c (C)    ->   temp         (rename)
+    conductivity_ms mS   ->   ec µS/cm     (* 1000)
+    dissolved_o2_pct %   ->   do_mg mg/L   (/ 100 * 7.4  at ~33 C)
+    light_lux            ->   lux          (same)
+    od680 (biomass)      ->   turbidity    (* 400 NTU, rough proxy)
+    """
+    from datetime import datetime, timezone
+    ts = reading.get("timestamp") or datetime.now(timezone.utc).isoformat()
+    return {
+        "timestamp": ts,
+        "ph":        float(reading.get("ph",               9.5)),
+        "ec":        float(reading.get("conductivity_ms",  2.0))  * 1000.0,
+        "do_mg":     float(reading.get("dissolved_o2_pct", 90.0)) / 100.0 * 7.4,
+        "temp":      float(reading.get("temperature_c",    33.0)),
+        "turbidity": float(reading.get("od680",            0.5))  * 400.0,
+        "lux":       float(reading.get("light_lux",        10_000.0)),
     }
 
 

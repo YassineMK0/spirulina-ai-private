@@ -34,7 +34,7 @@ _RULES: list[tuple[str, str, float, str, str]] = [
     ("temperature_c",    ">",  39.0,  "warning",  "overheating"),
     ("temperature_c",    "<",  20.0,  "warning",  "too cold"),
     ("od680",            ">",  1.1,   "harvest",  "ready to harvest"),
-    ("conductivity_ms",  ">",  35.0,  "warning",  "high salinity"),
+    ("conductivity_ms",  ">",   4.5,  "warning",  "high salinity"),
     ("dissolved_o2_pct", "<",  60.0,  "warning",  "low oxygen"),
 ]
 
@@ -84,10 +84,29 @@ def check_thresholds(sensor: dict) -> list[dict]:
     return breaches
 
 
+def _run_ml_prediction(sensor: dict) -> dict:
+    """Run anomaly model on a sensor reading. Returns {} silently on failure."""
+    try:
+        from agent.sensors import sensor_to_ml_input
+        from api.predict_anomaly import SensorReading, predict_anomaly as _predict, _get_artifacts
+        _get_artifacts()
+        pred = _predict(SensorReading(**sensor_to_ml_input(sensor)))
+        return {
+            "anomaly":            pred.anomaly,
+            "score":              pred.score,
+            "severity":           pred.severity,
+            "sensor_attribution": pred.sensor_attribution,
+        }
+    except Exception as exc:
+        print(f"[monitor] ML prediction failed: {exc}")
+        return {}
+
+
 def generate_alert_text(
     container_id: str,
     sensor: dict,
     breaches: list[dict],
+    ml_result: dict | None = None,
 ) -> str:
     """Generate a short plain-language alert from the reasoning LLM.
 
@@ -108,6 +127,25 @@ def generate_alert_text(
     )
     emoji = _SEVERITY_EMOJI[severity]
 
+    # Enrich with ML model result if available
+    ml_lines = ""
+    if ml_result and ml_result.get("anomaly"):
+        top_sensor = max(
+            ml_result["sensor_attribution"],
+            key=ml_result["sensor_attribution"].get,
+        ) if ml_result.get("sensor_attribution") else "unknown"
+        top_pct = int(ml_result["sensor_attribution"].get(top_sensor, 0) * 100)
+        ml_lines = (
+            f"\nML Anomaly Model:\n"
+            f"- Severity: {ml_result['severity'].upper()}\n"
+            f"- Score: {ml_result['score']:.3f}\n"
+            f"- Primary sensor: {top_sensor} ({top_pct}% of anomaly score)\n"
+        )
+        # Escalate severity if ML says critical
+        if ml_result["severity"] == "critical" and severity != "critical":
+            severity = "critical"
+            emoji = _SEVERITY_EMOJI["critical"]
+
     # Try LLM-generated alert
     try:
         from rag.generator.generate import reasoning_generate
@@ -119,7 +157,8 @@ def generate_alert_text(
 
         prompt = (
             f"Container {container_id} has triggered an automatic alert.\n\n"
-            f"Breached thresholds:\n{breach_lines}\n\n"
+            f"Breached thresholds:\n{breach_lines}\n"
+            f"{ml_lines}\n"
             f"Write a short alert message (3-4 sentences max) for the container owner. "
             f"Tell them what is wrong, what to do right now, and what happens if they wait. "
             f"Start with '{emoji} Alert:'"
@@ -180,20 +219,39 @@ def run_monitor_check(push_alert_fn) -> None:
 
     for user_id, container_id in list(_active_sessions.items()):
         try:
-            sensor  = get_sensor_reading(container_id)
+            sensor   = get_sensor_reading(container_id)
             breaches = check_thresholds(sensor)
+            ml_result = _run_ml_prediction(sensor)
 
-            if not breaches:
+            # Trigger alert on threshold breach OR ML-detected anomaly
+            ml_anomaly = ml_result.get("anomaly", False)
+            if not breaches and not ml_anomaly:
                 _last_alerts.pop(user_id, None)   # reset dedup on clean check
                 continue
 
-            alert_text = generate_alert_text(container_id, sensor, breaches)
+            # If ML fires but no threshold rule matched, create a synthetic breach entry
+            if ml_anomaly and not breaches:
+                top_sensor = (
+                    max(ml_result["sensor_attribution"], key=ml_result["sensor_attribution"].get)
+                    if ml_result.get("sensor_attribution") else "sensor"
+                )
+                breaches = [{
+                    "key":       top_sensor,
+                    "value":     sensor.get(top_sensor, "?"),
+                    "threshold": None,
+                    "operator":  "ml",
+                    "severity":  ml_result.get("severity", "warning"),
+                    "label":     f"ML anomaly ({top_sensor})",
+                    "emoji":     _SEVERITY_EMOJI.get(ml_result.get("severity", "warning"), "⚠️"),
+                }]
 
-            # Deduplicate — don't spam the same alert repeatedly
-            if _last_alerts.get(user_id) == alert_text:
+            # Dedup key = sorted breach labels (not LLM text — LLMs are non-deterministic)
+            breach_key = ",".join(sorted(b["label"] for b in breaches))
+            if _last_alerts.get(user_id) == breach_key:
                 continue
 
-            _last_alerts[user_id] = alert_text
+            alert_text = generate_alert_text(container_id, sensor, breaches, ml_result)
+            _last_alerts[user_id] = breach_key
             push_alert_fn(user_id, alert_text)
 
         except Exception as exc:

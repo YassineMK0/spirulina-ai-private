@@ -62,6 +62,7 @@ VALID_TOPICS = {
 
 @lru_cache(maxsize=1)
 def _get_collection():
+    """Return the ChromaDB collection singleton (loaded once on first call)."""
     ef = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
     client = chromadb.PersistentClient(path=str(CHROMA_DIR))
     return client.get_collection(name=COLLECTION_NAME, embedding_function=ef)

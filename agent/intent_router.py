@@ -28,7 +28,7 @@ from langchain_core.output_parsers import StrOutputParser
 from agent.state import AgentState
 
 # -- valid intents ---------------------------------------------------------
-VALID_INTENTS = {"KNOWLEDGE", "UPDATE", "HARVEST", "SYSTEM", "OFF_DOMAIN", "MEMORY_RECALL"}
+VALID_INTENTS = {"KNOWLEDGE", "UPDATE", "HARVEST", "SYSTEM", "OFF_DOMAIN", "MEMORY_RECALL", "UNKNOWN"}
 
 CONFIDENCE_THRESHOLD = 0.7
 
@@ -77,7 +77,7 @@ INTENT_PROMPT = ChatPromptTemplate.from_messages(
 
 
 def _get_llm():
-    """Return the LLM used for intent classification."""
+    """Return the intent classifier LLM (Groq / OpenAI / Ollama, from env)."""
     provider = os.getenv("INTENT_MODEL_PROVIDER", "groq").lower()
 
     # -- Groq (default) ----------------------------------------------------

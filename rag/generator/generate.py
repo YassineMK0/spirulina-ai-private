@@ -208,6 +208,7 @@ _PROMPT = ChatPromptTemplate.from_messages([
 
 @lru_cache(maxsize=1)
 def _get_llm():
+    """Return the generator LLM singleton (Groq / OpenAI / OpenRouter / HuggingFace)."""
     provider = GENERATOR_PROVIDER.lower()
     if provider == "groq":
         from langchain_groq import ChatGroq
@@ -258,6 +259,7 @@ def _format_history(history: list[dict], window: int = HISTORY_WINDOW) -> str:
 
 
 def _format_sensor_block(sensor: dict) -> str:
+    """Format sensor readings into an XML block for the LLM prompt, or '' if empty."""
     if not sensor:
         return ""
     lines = [f"  {k}: {v}" for k, v in sensor.items()]
@@ -265,9 +267,33 @@ def _format_sensor_block(sensor: dict) -> str:
 
 
 def _format_ml_block(ml: dict) -> str:
+    """Format ML model outputs into an XML block for the LLM prompt, or '' if empty.
+
+    When an anomaly is detected, promotes the key facts to the top so the
+    reasoning model immediately knows what to focus on.
+    """
     if not ml:
         return ""
-    lines = [f"  {k}: {v}" for k, v in ml.items()]
+
+    if ml.get("anomaly"):
+        attrib = ml.get("sensor_attribution", {})
+        top_sensor = max(attrib, key=attrib.get) if attrib else "unknown"
+        top_pct    = int(attrib.get(top_sensor, 0) * 100)
+        attrib_str = ", ".join(
+            f"{s}={int(v*100)}%" for s, v in
+            sorted(attrib.items(), key=lambda kv: -kv[1])
+        )
+        lines = [
+            f"  ANOMALY DETECTED",
+            f"  severity:          {ml.get('severity', '?').upper()}",
+            f"  score:             {ml.get('score', 0):.3f}  (0=normal, 1=most anomalous)",
+            f"  primary sensor:    {top_sensor} ({top_pct}% of anomaly score)",
+            f"  all attributions:  {attrib_str}",
+            f"  cold_start:        {ml.get('cold_start', False)}",
+        ]
+    else:
+        lines = [f"  {k}: {v}" for k, v in ml.items() if k not in ("anomaly_flag", "anomaly_detail")]
+
     return "<ml_predictions>\n" + "\n".join(lines) + "\n</ml_predictions>\n\n"
 
 
@@ -343,6 +369,7 @@ _REASONING_PROMPT = ChatPromptTemplate.from_messages([
 
 @lru_cache(maxsize=1)
 def _get_reasoning_llm():
+    """Return the reasoning LLM singleton (OpenRouter — nemotron/R1-class model)."""
     from langchain_openai import ChatOpenAI
     return ChatOpenAI(
         model=REASONING_MODEL,
@@ -439,8 +466,7 @@ def reasoning_generate(
 
     # Format sensor block without XML tags — reasoning prompt owns the structure
     sensor_text = "\n".join(f"{k}: {v}" for k, v in (sensor_state or {}).items()) or "No sensor data available."
-    ml_text     = "\n".join(f"{k}: {v}" for k, v in (ml_outputs  or {}).items()) or ""
-    ml_block    = f"<ml_predictions>\n{ml_text}\n</ml_predictions>\n\n" if ml_text else ""
+    ml_block    = _format_ml_block(ml_outputs or "")
 
     try:
         raw = chain.invoke({

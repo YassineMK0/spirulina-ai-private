@@ -70,6 +70,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[startup] retriever failed: {e}")
 
+    try:
+        from api.predict_anomaly import load_artifacts
+        load_artifacts()
+        print("[startup] anomaly model ready")
+    except Exception as e:
+        print(f"[startup] anomaly model: {e}")
+
     # Start APScheduler — monitor fires every 5 minutes 
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -79,7 +86,7 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             lambda: run_monitor_check(_push_alert),
             "interval",
-            minutes=5,
+            seconds=30,
             id="container_monitor",
         )
         scheduler.start()

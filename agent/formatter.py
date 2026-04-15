@@ -28,7 +28,7 @@ from typing import Any
 # ok_range: green ✅   warn_range: amber ⚠️   outside both: red 🔴
 _SENSOR_CFG: dict[str, tuple[str, str, tuple, tuple]] = {
     "ph":          ("pH",           "",       (8.5, 10.5), (8.0, 11.0)),
-    "ec":          ("EC",           "mS/cm",  (20,  35),   (15,  45)),
+    "ec":          ("EC",           "mS/cm",  (1.5, 4.0),  (1.0, 5.0)),
     "temperature": ("Temperature",  "°C",     (30,  38),   (25,  42)),
     "temp":        ("Temperature",  "°C",     (30,  38),   (25,  42)),
     "od":          ("OD680",        "",       (0.4, 1.2),  (0.2, 1.5)),
@@ -190,7 +190,7 @@ def template_sensor_card(sensor: dict[str, Any], container_id: str = "") -> str:
 # Template 3 — 60-minute prediction summary
 # ---------------------------------------------------------------------------
 
-def template_prediction(ml_outputs: dict[str, Any], sensor: dict[str, Any] = {}) -> str:
+def template_prediction(ml_outputs: dict[str, Any], sensor: dict[str, Any] | None = None) -> str:
     """Forecast table built from ml_outputs['growth_prediction'] entries."""
     pred = ml_outputs.get("growth_prediction") or ml_outputs.get("prediction")
     if not pred:
@@ -208,7 +208,7 @@ def template_prediction(ml_outputs: dict[str, Any], sensor: dict[str, Any] = {})
                 fut_val  = data.get("in_60min", "—")
                 trend    = data.get("trend",    "→ Stable")
             else:
-                now_val  = sensor.get(metric, "—")
+                now_val  = (sensor or {}).get(metric, "—")
                 fut_val  = data
                 trend    = "→ Forecast"
             rows.append(f"| {metric} | {now_val} | {fut_val} | {trend} |")
@@ -231,7 +231,7 @@ def template_prediction(ml_outputs: dict[str, Any], sensor: dict[str, Any] = {})
 # Template 4 — Harvest window card
 # ---------------------------------------------------------------------------
 
-def template_harvest_card(ml_outputs: dict[str, Any], sensor: dict[str, Any] = {}) -> str:
+def template_harvest_card(ml_outputs: dict[str, Any], sensor: dict[str, Any] | None = None) -> str:
     """Three-scenario harvest timing card from ml_outputs['harvest_readiness']."""
     harvest = ml_outputs.get("harvest_readiness") or ml_outputs.get("harvest")
     if not harvest:
@@ -354,8 +354,8 @@ def format_message(
                 container_id=container_id,
             ))
 
-    # ── Sensor card (UPDATE intent or sensor data present for any intent) ───
-    if has_container and sensor and intent in ("UPDATE", "SYSTEM"):
+    # ── Sensor card — show for UPDATE/SYSTEM or whenever an anomaly fires ───
+    if has_container and sensor and (intent in ("UPDATE", "SYSTEM") or ml_outputs.get("anomaly_flag")):
         parts.append(template_sensor_card(sensor, container_id))
 
     # ── Harvest window (HARVEST intent) ─────────────────────────────────────

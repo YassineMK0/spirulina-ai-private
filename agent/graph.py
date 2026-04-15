@@ -72,8 +72,15 @@ def _post_rag_gate(state: AgentState) -> str:
 
 # -- gate: after sensors — choose generator by intent ---------------------
 def _post_sensors_gate(state: AgentState) -> str:
-    """HARVEST/SYSTEM -> DeepSeek R1 reasoning; everything else -> Llama 70b."""
+    """Route to reasoning agent for:
+    - HARVEST / SYSTEM intents (always need step-by-step analysis)
+    - Any intent when the ML model detected an anomaly
+    Everything else -> Llama 70b generate_response.
+    """
     if state.get("intent", "KNOWLEDGE").upper() in _REASONING_INTENTS:
+        return "reasoning_agent"
+    ml = state.get("ml_outputs") or {}
+    if ml.get("anomaly") and ml.get("severity") != "normal":
         return "reasoning_agent"
     return "generate_response"
 

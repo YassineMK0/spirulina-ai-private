@@ -162,9 +162,62 @@ def retrieve_rag(state: AgentState) -> dict[str, Any]:
 
 
 def run_ml_models(state: AgentState) -> dict[str, Any]:
-    """Stage 4 — execute ML inference (growth prediction, anomaly, etc.)."""
+    """Stage 4 — run anomaly detection on the current sensor reading.
+
+    Calls predict_anomaly.py directly (same process, no HTTP hop).
+    The result is stored in ml_outputs so generate_response and
+    format_response can include severity + sensor attribution.
+    """
     print("[node] run_ml_models")
-    return {"ml_outputs": state.get("ml_outputs") or {}}
+    container_id = state.get("container_id") or ""
+    if not container_id:
+        return {"ml_outputs": {}}
+
+    try:
+        from agent.sensors import get_sensor_reading, sensor_to_ml_input
+        from api.predict_anomaly import SensorReading, predict_anomaly as _predict, _get_artifacts
+
+        _get_artifacts()                                   # lazy-load model artefacts
+        reading        = get_sensor_reading(container_id)
+        ml_input       = sensor_to_ml_input(reading)
+        pred           = _predict(SensorReading(**ml_input))
+
+        # Top contributing sensor for the alert detail string
+        top_sensor = (
+            max(pred.sensor_attribution, key=pred.sensor_attribution.get)
+            if pred.sensor_attribution else "unknown"
+        )
+        top_pct = int(pred.sensor_attribution.get(top_sensor, 0) * 100)
+
+        if pred.anomaly:
+            detail = (
+                f"Severity: **{pred.severity}**  |  Score: {pred.score:.3f}  |  "
+                f"Top sensor: **{top_sensor}** ({top_pct}%)"
+            )
+        else:
+            detail = f"Score: {pred.score:.3f} (normal range)"
+
+        print(f"  [ml] anomaly={pred.anomaly}  severity={pred.severity}  "
+              f"score={pred.score:.3f}  top={top_sensor}({top_pct}%)")
+
+        return {
+            "ml_outputs": {
+                "anomaly":            pred.anomaly,
+                "anomaly_flag":       pred.anomaly,   # key read by formatter
+                "anomaly_detail":     detail,          # key read by formatter
+                "score":              pred.score,
+                "severity":           pred.severity,
+                "sensor_attribution": pred.sensor_attribution,
+                "inference_time_ms":  pred.inference_time_ms,
+                "cold_start":         pred.cold_start,
+            }
+        }
+
+    except Exception as exc:
+        import traceback
+        print(f"  [warn] ML inference failed: {exc}")
+        traceback.print_exc()
+        return {"ml_outputs": {}}
 
 
 def read_sensors(state: AgentState) -> dict[str, Any]:
