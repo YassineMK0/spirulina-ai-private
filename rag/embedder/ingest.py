@@ -24,6 +24,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import chromadb
 import fitz  # PyMuPDF
 from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
@@ -37,7 +40,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 RAW_DIR        = Path(os.getenv("RAW_DATA_DIR",      "data/raw"))
 CHROMA_DIR     = Path(os.getenv("CHROMA_PERSIST_DIR", "data/processed/chroma"))
 COLLECTION_NAME = "spirulina_kb"
-EMBED_MODEL    = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
+EMBED_MODEL    = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
 
 CHUNK_SIZE    = 500
 CHUNK_OVERLAP = 50
@@ -404,7 +407,7 @@ def ingest(
     if collection_name in existing_names:
         existing = client.get_collection(name=collection_name, embedding_function=ef)
         sample = existing.get(limit=1, include=["embeddings"])
-        if sample["embeddings"] and len(sample["embeddings"][0]) != len(ef(["test"])[0]):
+        if sample["embeddings"] is not None and len(sample["embeddings"]) > 0 and len(sample["embeddings"][0]) != len(ef(["test"])[0]):
             if verbose:
                 old_dim = len(sample["embeddings"][0])
                 new_dim = len(ef(["test"])[0])

@@ -44,7 +44,7 @@ from rank_bm25 import BM25Okapi
 
 CHROMA_DIR      = Path(os.getenv("CHROMA_PERSIST_DIR", "data/processed/chroma"))
 COLLECTION_NAME = "spirulina_kb"
-EMBED_MODEL     = os.getenv("EMBED_MODEL", "BAAI/bge-m3")
+EMBED_MODEL     = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
 DEFAULT_TOP_K   = 5
 RRF_K           = 60   # RRF constant — higher = smoother rank blending
 

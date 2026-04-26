@@ -1,0 +1,28 @@
+services:
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  backend:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - CHROMA_PERSIST_DIR=/app/data/processed/chroma
+    volumes:
+      - chroma_data:/app/data/processed/chroma
+      - model_cache:/root/.cache/torch
+    depends_on:
+      - redis
+
+volumes:
+  redis_data:
+  chroma_data:
+  model_cache:
