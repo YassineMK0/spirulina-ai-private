@@ -29,13 +29,13 @@ from typing import Any
 # Each rule: (sensor_key, operator, threshold, severity, short_label)
 # severity: "critical" | "warning" | "harvest"
 _RULES: list[tuple[str, str, float, str, str]] = [
-    ("ph",               "<",  7.5,   "critical", "pH crash"),
-    ("ph",               ">",  10.8,  "warning",  "pH too high"),
-    ("temperature_c",    ">",  39.0,  "warning",  "overheating"),
-    ("temperature_c",    "<",  20.0,  "warning",  "too cold"),
-    ("od680",            ">",  1.1,   "harvest",  "ready to harvest"),
-    ("conductivity_ms",  ">",   4.5,  "warning",  "high salinity"),
-    ("dissolved_o2_pct", "<",  60.0,  "warning",  "low oxygen"),
+    ("pH",          "<",  7.5,    "critical", "pH crash"),
+    ("pH",          ">",  10.8,   "warning",  "pH too high"),
+    ("temperature", ">",  39.0,   "warning",  "overheating"),
+    ("temperature", "<",  20.0,   "warning",  "too cold"),
+    ("turbidity",   ">",  300.0,  "harvest",  "ready to harvest"),
+    ("EC",          ">",  3500.0, "warning",  "high salinity"),
+    ("DO",          "<",  4.0,    "warning",  "low oxygen"),
 ]
 
 _SEVERITY_EMOJI = {
@@ -84,18 +84,29 @@ def check_thresholds(sensor: dict) -> list[dict]:
     return breaches
 
 
-def _run_ml_prediction(sensor: dict) -> dict:
-    """Run anomaly model on a sensor reading. Returns {} silently on failure."""
+def _run_ml_prediction(container_id: str) -> dict:
+    """Run M1 LSTM anomaly model on the container history. Returns {} silently on failure."""
     try:
-        from agent.sensors import sensor_to_ml_input
-        from api.predict_anomaly import SensorReading, predict_anomaly as _predict, _get_artifacts
-        _get_artifacts()
-        pred = _predict(SensorReading(**sensor_to_ml_input(sensor)))
+        import pandas as pd
+        from agent.sensors import get_history
+        from api.predict_lstm import predict_df, load_artifact
+
+        history = get_history(container_id)
+        if not history:
+            return {}
+
+        artifact = load_artifact()
+        df       = pd.DataFrame(history)
+        result   = predict_df(df, artifact)
+        last     = result.iloc[-1]
+
+        import numpy as np
+        score    = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
         return {
-            "anomaly":            pred.anomaly,
-            "score":              pred.score,
-            "severity":           pred.severity,
-            "sensor_attribution": pred.sensor_attribution,
+            "anomaly":  bool(last["is_anomaly"]),
+            "score":    round(score, 4),
+            "severity": str(last["severity"]),
+            "trend":    str(last["trend_direction"]),
         }
     except Exception as exc:
         print(f"[monitor] ML prediction failed: {exc}")
@@ -130,19 +141,13 @@ def generate_alert_text(
     # Enrich with ML model result if available
     ml_lines = ""
     if ml_result and ml_result.get("anomaly"):
-        top_sensor = max(
-            ml_result["sensor_attribution"],
-            key=ml_result["sensor_attribution"].get,
-        ) if ml_result.get("sensor_attribution") else "unknown"
-        top_pct = int(ml_result["sensor_attribution"].get(top_sensor, 0) * 100)
         ml_lines = (
-            f"\nML Anomaly Model:\n"
-            f"- Severity: {ml_result['severity'].upper()}\n"
-            f"- Score: {ml_result['score']:.3f}\n"
-            f"- Primary sensor: {top_sensor} ({top_pct}% of anomaly score)\n"
+            f"\nML Anomaly Model (M1-LSTM):\n"
+            f"- Severity: {ml_result.get('severity', '?').upper()}\n"
+            f"- Score: {ml_result.get('score', 0):.3f}\n"
+            f"- Trend: {ml_result.get('trend', 'unknown')}\n"
         )
-        # Escalate severity if ML says critical
-        if ml_result["severity"] == "critical" and severity != "critical":
+        if ml_result.get("severity") == "critical" and severity != "critical":
             severity = "critical"
             emoji = _SEVERITY_EMOJI["critical"]
 
@@ -150,9 +155,9 @@ def generate_alert_text(
     try:
         from rag.generator.generate import reasoning_generate
         from agent.sensors import format_sensor_summary
-        from rag.retriever.retrieve import retrieve
+        from rag.retriever.retrieve import retrieve, format_context
 
-        context = retrieve("sensor anomaly alert spirulina")
+        context = format_context(retrieve("sensor anomaly alert spirulina", top_k=3))
         sensor_summary = format_sensor_summary(sensor)
 
         prompt = (
@@ -219,9 +224,9 @@ def run_monitor_check(push_alert_fn) -> None:
 
     for user_id, container_id in list(_active_sessions.items()):
         try:
-            sensor   = get_sensor_reading(container_id)
-            breaches = check_thresholds(sensor)
-            ml_result = _run_ml_prediction(sensor)
+            sensor    = get_sensor_reading(container_id)
+            breaches  = check_thresholds(sensor)
+            ml_result = _run_ml_prediction(container_id)
 
             # Trigger alert on threshold breach OR ML-detected anomaly
             ml_anomaly = ml_result.get("anomaly", False)

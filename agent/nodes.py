@@ -162,66 +162,113 @@ def retrieve_rag(state: AgentState) -> dict[str, Any]:
 
 
 def run_ml_models(state: AgentState) -> dict[str, Any]:
-    """Stage 4 — run anomaly detection on the current sensor reading.
+    """Stage 4 — run M1/M2/M3 on the latest sensor data.
 
-    Calls predict_anomaly.py directly (same process, no HTTP hop).
-    The result is stored in ml_outputs so generate_response and
-    format_response can include severity + sensor attribution.
+    Data sources (in priority order):
+      1. last_sensor_state  — live MQTT reading (populated by read_sensors)
+      2. DB latest row      — last persisted reading (covers server restarts)
+
+    If neither source has data, returns empty outputs immediately.
     """
     print("[node] run_ml_models")
     container_id = state.get("container_id") or ""
     if not container_id:
-        return {"ml_outputs": {}}
+        return {"ml_outputs": {}, "tools_used": []}
 
+    import pandas as pd
+    from agent.sensors import get_history
+    from data.store import sensor_store
+
+    # ── Resolve latest reading ────────────────────────────────────────────────
+    reading = state.get("last_sensor_state") or {}
+    if not reading:
+        rows = sensor_store.get_latest(container_id, n=1)
+        if rows:
+            reading = rows[-1]
+            print(f"  [ml] MQTT cache empty — using latest DB row ({reading.get('date','?')})")
+
+    if not reading:
+        print("  [ml] no sensor data available — skipping ML")
+        return {"ml_outputs": {}, "tools_used": []}
+
+    ml: dict[str, Any] = {}
+    tools: list[str]   = ["sensor.read()"]
+
+    # ── M1: LSTM anomaly detection ────────────────────────────────────────────
     try:
-        from agent.sensors import get_sensor_reading, sensor_to_ml_input
-        from api.predict_anomaly import SensorReading, predict_anomaly as _predict, _get_artifacts
+        from api.predict_lstm import predict_df, load_artifact
 
-        _get_artifacts()                                   # lazy-load model artefacts
-        reading        = get_sensor_reading(container_id)
-        ml_input       = sensor_to_ml_input(reading)
-        pred           = _predict(SensorReading(**ml_input))
+        history = get_history(container_id)
+        if history:
+            artifact = load_artifact()
+            result   = predict_df(pd.DataFrame(history), artifact)
+            last     = result.iloc[-1]
+            score    = float(last["anomaly_score"]) if not pd.isna(last["anomaly_score"]) else 0.0
+            anomaly  = bool(last["is_anomaly"])
+            severity = str(last["severity"])
+            trend    = str(last["trend_direction"])
 
-        # Top contributing sensor for the alert detail string
-        top_sensor = (
-            max(pred.sensor_attribution, key=pred.sensor_attribution.get)
-            if pred.sensor_attribution else "unknown"
-        )
-        top_pct = int(pred.sensor_attribution.get(top_sensor, 0) * 100)
-
-        if pred.anomaly:
-            detail = (
-                f"Severity: **{pred.severity}**  |  Score: {pred.score:.3f}  |  "
-                f"Top sensor: **{top_sensor}** ({top_pct}%)"
-            )
-        else:
-            detail = f"Score: {pred.score:.3f} (normal range)"
-
-        print(f"  [ml] anomaly={pred.anomaly}  severity={pred.severity}  "
-              f"score={pred.score:.3f}  top={top_sensor}({top_pct}%)")
-
-        return {
-            "ml_outputs": {
-                "anomaly":            pred.anomaly,
-                "anomaly_flag":       pred.anomaly,   # key read by formatter
-                "anomaly_detail":     detail,          # key read by formatter
-                "score":              pred.score,
-                "severity":           pred.severity,
-                "sensor_attribution": pred.sensor_attribution,
-                "inference_time_ms":  pred.inference_time_ms,
-                "cold_start":         pred.cold_start,
-            }
-        }
-
+            ml.update({
+                "anomaly":        anomaly,
+                "anomaly_flag":   anomaly,
+                "score":          round(score, 4),
+                "severity":       severity,
+                "trend":          trend,
+                "anomaly_detail": (
+                    f"Severity: **{severity}**  |  Score: {score:.3f}  |  Trend: {trend}"
+                    if anomaly else f"Score: {score:.3f} (normal)"
+                ),
+            })
+            tools.append("M1 Anomaly Detector")
+            print(f"  [m1] anomaly={anomaly}  severity={severity}  score={score:.3f}")
     except Exception as exc:
-        import traceback
-        print(f"  [warn] ML inference failed: {exc}")
-        traceback.print_exc()
-        return {"ml_outputs": {}}
+        print(f"  [warn] M1 failed: {exc}")
+
+    # ── M2: next-day turbidity forecast ──────────────────────────────────────
+    try:
+        from api.predict_lgbm import predict, load_artifact as load_m2
+
+        history = get_history(container_id)
+        if len(history) >= 5:
+            forecast = predict(pd.DataFrame(history), load_m2())
+            ml["turbidity_forecast"] = forecast
+            tools.append("M2 Growth Predictor")
+            print(f"  [m2] p50={forecast.get('prediction')}")
+    except Exception as exc:
+        print(f"  [warn] M2 failed: {exc}")
+
+    # ── M3: harvest readiness scheduler ──────────────────────────────────────
+    try:
+        from api.predict_lgbm_harvest import schedule, load_artifacts as load_m3
+
+        history   = get_history(container_id)
+        n_readings = len(history)
+        min_rows  = 6
+
+        if n_readings >= min_rows:
+            m3_art, m2_art = load_m3()
+            harvest = schedule(pd.DataFrame(history), m3_art, m2_art)
+            ml["harvest"] = harvest
+            tools.append("M3 Harvest Planner")
+            print(f"  [m3] recommendation={harvest.get('recommendation')}")
+        else:
+            # Not enough history — tell the reasoning agent explicitly
+            ml["harvest"] = {
+                "cold_start":     True,
+                "readings_have":  n_readings,
+                "readings_need":  min_rows,
+                "recommendation": f"Not enough data yet ({n_readings}/{min_rows} readings). "
+                                  f"Need {min_rows - n_readings} more sensor readings before M3 can predict harvest timing.",
+            }
+            print(f"  [m3] cold start — only {n_readings}/{min_rows} readings")
+    except Exception as exc:
+        print(f"  [warn] M3 failed: {exc}")
+
+    return {"ml_outputs": ml, "tools_used": tools}
 
 
 def read_sensors(state: AgentState) -> dict[str, Any]:
-    """Stage 5 — fetch latest sensor telemetry."""
+    """Stage 3b — fetch latest reading from the MQTT cache."""
     print("[node] read_sensors")
     container_id = state.get("container_id") or ""
     if not container_id:
@@ -229,7 +276,8 @@ def read_sensors(state: AgentState) -> dict[str, Any]:
     try:
         from agent.sensors import get_sensor_reading
         reading = get_sensor_reading(container_id)
-        print(f"  [sensors] got reading for container={container_id}: status={reading.get('status')}")
+        status  = reading.get("status", "no data") if reading else "no data"
+        print(f"  [sensors] container={container_id}  status={status}")
         return {"last_sensor_state": reading}
     except Exception as exc:
         print(f"  [warn] sensor read failed: {exc}")
@@ -377,12 +425,78 @@ def generate_response(state: AgentState) -> dict[str, Any]:
     return {"response": answer}
 
 
-def format_response(state: AgentState) -> dict[str, Any]:
-    """Stage 7 — wrap the raw LLM answer in the appropriate markdown template.
+def _build_content(state: AgentState) -> dict:
+    """Build the structured content object consumed by the Next.js frontend.
 
-    Selects and combines templates based on intent, has_container, and
-    which data (sensor / ML) is actually present in state.
+    Maps intent + ml_outputs to one of four content types:
+      diagnosis — M1 anomaly detected (sensors + recommended action)
+      harvest   — HARVEST intent (M3 3-day schedule + M2 forecast)
+      text      — everything else (plain conversational response)
     """
+    intent  = state.get("intent", "KNOWLEDGE").upper()
+    ml      = state.get("ml_outputs") or {}
+    raw     = state.get("response", "")
+    sensors = state.get("last_sensor_state") or {}
+
+    # --- DIAGNOSIS: anomaly flag from M1 ---
+    if ml.get("anomaly_flag"):
+        sensor_cards = []
+        thresholds = {
+            "pH":          {"unit": "",      "opt": "9.5–10.5", "min_ok": 9.5, "max_ok": 10.5},
+            "temperature": {"unit": " °C",   "opt": "30–37°C",  "min_ok": 30,  "max_ok": 37},
+            "turbidity":   {"unit": " NTU",  "opt": "50–250",   "min_ok": 50,  "max_ok": 250},
+            "EC":          {"unit": " µS/cm","opt": "1500–3000","min_ok": 1500,"max_ok": 3000},
+            "DO":          {"unit": " mg/L", "opt": "6–8",      "min_ok": 6,   "max_ok": 8},
+        }
+        for key, meta in thresholds.items():
+            val = sensors.get(key)
+            if val is None:
+                continue
+            fval     = float(val)
+            is_alert = not (meta["min_ok"] <= fval <= meta["max_ok"])
+            sensor_cards.append({
+                "label":   key,
+                "val":     str(round(fval, 2)),
+                "unit":    meta["unit"],
+                "opt":     meta["opt"],
+                "isAlert": is_alert,
+            })
+        return {
+            "type":    "diagnosis",
+            "cause":   raw,
+            "sensors": sensor_cards,
+            "action":  {"dose": "", "note": raw},
+            "score":   ml.get("score", 0),
+            "severity":ml.get("severity", "low"),
+            "trend":   ml.get("trend", "stable"),
+        }
+
+    # --- HARVEST: M3 schedule available ---
+    if intent == "HARVEST" and ml.get("harvest"):
+        h      = ml["harvest"]
+        today  = h.get("today",     {})
+        tmrw   = h.get("tomorrow",  {})
+        d2     = h.get("day_after", {})
+        rec    = h.get("recommendation", "")
+        tf     = ml.get("turbidity_forecast") or {}
+        return {
+            "type":      "harvest",
+            "body":      raw,
+            "schedule":  {
+                "today":     today,
+                "tomorrow":  tmrw,
+                "day_after": d2,
+            },
+            "recommendation": rec,
+            "turbidity_forecast": tf,
+        }
+
+    # --- DEFAULT: plain text ---
+    return {"type": "text", "text": raw}
+
+
+def format_response(state: AgentState) -> dict[str, Any]:
+    """Stage 7 — build structured content + update chat history."""
     print("[node] format_response")
 
     from agent.formatter import format_message
@@ -397,7 +511,10 @@ def format_response(state: AgentState) -> dict[str, Any]:
         container_id  = state.get("container_id", ""),
     )
 
+    content = _build_content(state)
+
     return {
-        "response": formatted,
+        "response":    formatted,
+        "content":     content,
         "chat_history": [{"role": "assistant", "content": formatted}],
     }

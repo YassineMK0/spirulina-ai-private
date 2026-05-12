@@ -269,30 +269,71 @@ def _format_sensor_block(sensor: dict) -> str:
 def _format_ml_block(ml: dict) -> str:
     """Format ML model outputs into an XML block for the LLM prompt, or '' if empty.
 
-    When an anomaly is detected, promotes the key facts to the top so the
-    reasoning model immediately knows what to focus on.
+    Three cases handled explicitly so the reasoning model gets clean, structured data:
+      - Anomaly (M1)    : severity, score, primary sensor
+      - Harvest (M3)    : 3-day schedule with harvest %, confidence, recommendation
+      - Turbidity (M2)  : next-day p10/p50/p90 forecast
     """
     if not ml:
         return ""
 
+    lines: list[str] = []
+
+    # ── M1: anomaly detection ────────────────────────────────────────────────
     if ml.get("anomaly"):
-        attrib = ml.get("sensor_attribution", {})
-        top_sensor = max(attrib, key=attrib.get) if attrib else "unknown"
-        top_pct    = int(attrib.get(top_sensor, 0) * 100)
-        attrib_str = ", ".join(
-            f"{s}={int(v*100)}%" for s, v in
-            sorted(attrib.items(), key=lambda kv: -kv[1])
-        )
-        lines = [
-            f"  ANOMALY DETECTED",
-            f"  severity:          {ml.get('severity', '?').upper()}",
-            f"  score:             {ml.get('score', 0):.3f}  (0=normal, 1=most anomalous)",
-            f"  primary sensor:    {top_sensor} ({top_pct}% of anomaly score)",
-            f"  all attributions:  {attrib_str}",
-            f"  cold_start:        {ml.get('cold_start', False)}",
+        lines += [
+            "  [M1 ANOMALY DETECTOR]",
+            f"  anomaly:   YES",
+            f"  severity:  {ml.get('severity', '?').upper()}",
+            f"  score:     {ml.get('score', 0):.3f}  (0=normal  1=critical)",
+            f"  trend:     {ml.get('trend', 'unknown')}",
         ]
-    else:
-        lines = [f"  {k}: {v}" for k, v in ml.items() if k not in ("anomaly_flag", "anomaly_detail")]
+    elif "score" in ml:
+        lines += [
+            "  [M1 ANOMALY DETECTOR]",
+            f"  anomaly:   NO  (score={ml.get('score', 0):.3f})",
+        ]
+
+    # ── M3: harvest schedule ─────────────────────────────────────────────────
+    harvest = ml.get("harvest")
+    if harvest:
+        if harvest.get("cold_start"):
+            lines += [
+                "",
+                "  [M3 HARVEST SCHEDULER]",
+                f"  status: NOT ENOUGH DATA",
+                f"  {harvest.get('recommendation', '')}",
+            ]
+        else:
+            today  = harvest.get("today",     {})
+            tmrw   = harvest.get("tomorrow",  {})
+            d2     = harvest.get("day_after", {})
+            rec    = harvest.get("recommendation", "—")
+            lines += [
+                "",
+                "  [M3 HARVEST SCHEDULER]",
+                f"  today      → {today.get('label','?'):12s}  harvest {today.get('harvest_pct',0):2d}%  "
+                f"confidence {today.get('confidence',0):.0%}",
+                f"  tomorrow   → {tmrw.get('label','?'):12s}  harvest {tmrw.get('harvest_pct',0):2d}%  "
+                f"confidence {tmrw.get('confidence',0):.0%}",
+                f"  day after  → {d2.get('label','?'):12s}  harvest {d2.get('harvest_pct',0):2d}%  "
+                f"confidence {d2.get('confidence',0):.0%}",
+                f"  recommendation: {rec}",
+            ]
+
+    # ── M2: turbidity forecast ───────────────────────────────────────────────
+    tf = ml.get("turbidity_forecast")
+    if tf and not tf.get("cold_start"):
+        lines += [
+            "",
+            "  [M2 TURBIDITY FORECAST — tomorrow]",
+            f"  low:        {tf.get('low', '?')} NTU",
+            f"  predicted:  {tf.get('prediction', '?')} NTU",
+            f"  high:       {tf.get('high', '?')} NTU",
+        ]
+
+    if not lines:
+        return ""
 
     return "<ml_predictions>\n" + "\n".join(lines) + "\n</ml_predictions>\n\n"
 

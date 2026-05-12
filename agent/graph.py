@@ -60,11 +60,15 @@ def _route_after_classify(state: AgentState) -> str:
 _REASONING_INTENTS = {"HARVEST", "SYSTEM"}
 
 
-# -- gate: after RAG — route by container + intent -------------------------
+# -- gate: after RAG — route by tier, container, and intent ---------------
 def _post_rag_gate(state: AgentState) -> str:
-    """Run ML+sensors when container exists; otherwise split by intent."""
+    """Free tier: RAG-only, skip sensors and ML entirely.
+    Pro tier: run sensors first, then ML, then choose generator by intent.
+    """
+    if state.get("tier", "free") == "free":
+        return "generate_response"
     if state.get("has_container"):
-        return "run_ml_models"
+        return "read_sensors"
     if state.get("intent", "KNOWLEDGE").upper() in _REASONING_INTENTS:
         return "reasoning_agent"
     return "generate_response"
@@ -120,25 +124,25 @@ builder.add_edge("request_clarification", END)
 builder.add_edge("reject_off_domain",      END)
 builder.add_edge("recall_memory",          END)
 
-# after RAG → post-RAG gate (container + intent aware)
+# after RAG → post-RAG gate (tier + container + intent aware)
 builder.add_conditional_edges(
     "retrieve_rag",
     _post_rag_gate,
     {
-        "run_ml_models":    "run_ml_models",
-        "reasoning_agent":  "reasoning_agent",
-        "generate_response":"generate_response",
+        "read_sensors":      "read_sensors",
+        "reasoning_agent":   "reasoning_agent",
+        "generate_response": "generate_response",
     },
 )
 
-# after ML+sensors → choose generator by intent
-builder.add_edge("run_ml_models", "read_sensors")
+# sensors → ML → choose generator by intent
+builder.add_edge("read_sensors", "run_ml_models")
 builder.add_conditional_edges(
-    "read_sensors",
+    "run_ml_models",
     _post_sensors_gate,
     {
-        "reasoning_agent":  "reasoning_agent",
-        "generate_response":"generate_response",
+        "reasoning_agent":   "reasoning_agent",
+        "generate_response": "generate_response",
     },
 )
 

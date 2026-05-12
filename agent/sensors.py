@@ -1,177 +1,200 @@
-"""Sensor reading interface.
+"""Sensor reading interface — MQTT subscriber.
 
-Mock implementation for development.  To connect real IoT data:
-    - Replace the body of get_sensor_reading() with your API call
-    - Keep the return schema identical so the rest of the pipeline is unaffected
+Configure via environment variables:
+    MQTT_BROKER_URL=mqtt://your-broker.example.com:1883
+    MQTT_TOPIC_PREFIX=spirulina/sensors
 
-Expected schema (all keys optional — missing keys are treated as unavailable):
-    ph               float   6.0 – 11.0
-    temperature_c    float   Celsius
-    od680            float   Optical density at 680 nm (biomass proxy)
-    conductivity_ms  float   mS/cm (medium salinity)
-    dissolved_o2_pct float   % saturation
-    light_lux        float   lux at culture surface
-    co2_ppm          float   CO2 concentration in headspace
-    timestamp        str     ISO-8601 UTC
-    status           str     "ok" | "warning" | "error"
+Readings arrive on topic: {MQTT_TOPIC_PREFIX}/{container_id}
+
+Expected JSON payload per message:
+    {
+      "pH":          9.5,    // 6.0 – 11.0
+      "EC":          2500.0, // µS/cm
+      "DO":          6.6,    // mg/L
+      "temperature": 33.0,   // °C
+      "luminosity":  10000.0,// lux
+      "turbidity":   200.0,  // NTU
+      "timestamp":   "2026-05-07T10:00:00Z",
+      "status":      "ok"    // "ok" | "warning" | "error"
+    }
+
+Call start_mqtt_subscriber() once from the FastAPI lifespan.
+Call get_sensor_reading(container_id) from nodes.py to get the latest cached reading.
+Call get_history(container_id) to get the rolling buffer for ML model inference.
 """
 
 from __future__ import annotations
 
-import random
-import time
+import json
+import os
+import threading
 from datetime import datetime, timezone
+from typing import Any
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+MQTT_BROKER_URL   = os.getenv("MQTT_BROKER_URL",   "mqtt://localhost:1883")
+MQTT_TOPIC_PREFIX = os.getenv("MQTT_TOPIC_PREFIX",  "spirulina/sensors")
+
+# ---------------------------------------------------------------------------
+# Module-level state
+# ---------------------------------------------------------------------------
+
+_cache: dict[str, dict] = {}   # latest reading per container (in-memory only)
+_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
-# test-rotating — cycles through 6 anomaly states every 30 seconds
-# Used to verify the proactive alert pipeline end-to-end.
+# MQTT subscriber
 # ---------------------------------------------------------------------------
 
-_ROTATING_INTERVAL = 30   # seconds per slot (match APScheduler interval)
+def start_mqtt_subscriber() -> None:
+    """Start background MQTT subscriber thread.
 
-_ROTATING_SLOTS = [
-    {"ph": 9.5, "temperature_c": 33.0, "od680": 0.85, "conductivity_ms": 2.5,
-     "dissolved_o2_pct": 95.0, "light_lux": 10_000, "co2_ppm": 480, "status": "ok"},
-    {"ph": 7.2, "temperature_c": 32.0, "od680": 0.70, "conductivity_ms": 2.5,
-     "dissolved_o2_pct": 78.0, "light_lux": 9_500,  "co2_ppm": 720, "status": "warning"},
-    {"ph": 9.4, "temperature_c": 41.5, "od680": 0.60, "conductivity_ms": 2.8,
-     "dissolved_o2_pct": 65.0, "light_lux": 14_000, "co2_ppm": 390, "status": "warning"},
-    {"ph": 9.3, "temperature_c": 33.0, "od680": 0.55, "conductivity_ms": 4.8,
-     "dissolved_o2_pct": 80.0, "light_lux": 9_000,  "co2_ppm": 430, "status": "warning"},
-    {"ph": 7.8, "temperature_c": 40.0, "od680": 0.40, "conductivity_ms": 4.0,
-     "dissolved_o2_pct": 55.0, "light_lux": 13_000, "co2_ppm": 850, "status": "error"},
-    {"ph": 9.6, "temperature_c": 33.5, "od680": 1.15, "conductivity_ms": 2.8,
-     "dissolved_o2_pct": 98.0, "light_lux": 11_000, "co2_ppm": 460, "status": "ok"},
-]
+    Connects to MQTT_BROKER_URL and subscribes to {MQTT_TOPIC_PREFIX}/+
+    (wildcard — one topic per container).  Call once from FastAPI lifespan.
+    """
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        print("[sensors] paho-mqtt not installed — MQTT updates disabled. "
+              "Install: pip install paho-mqtt")
+        return
+
+    host, port = _parse_broker_url(MQTT_BROKER_URL)
+    topic      = f"{MQTT_TOPIC_PREFIX}/+"
+
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        # paho-mqtt v2: reason_code is a ReasonCode object; 0 / "Success" = connected
+        rc = reason_code if isinstance(reason_code, int) else reason_code.value
+        if rc == 0:
+            client.subscribe(topic)
+            print(f"[sensors] MQTT connected to {MQTT_BROKER_URL}  topic={topic}")
+        else:
+            print(f"[sensors] MQTT connection failed  rc={rc}")
+
+    def on_message(client, userdata, msg):
+        try:
+            container_id = msg.topic.split("/")[-1]
+            reading: dict = json.loads(msg.payload.decode())
+            reading.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+            reading.setdefault("status", "ok")
+            with _lock:
+                _cache[container_id] = reading
+            # Persist to SQLite store (S3 simulation)
+            from data.store import sensor_store
+            sensor_store.push(container_id, reading)
+        except Exception as exc:
+            print(f"[sensors] MQTT message parse error: {exc}")
+
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            print(f"[sensors] MQTT unexpected disconnect rc={rc} — reconnecting")
+
+    try:
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    except AttributeError:
+        client = mqtt.Client()   # paho-mqtt < 2.0 fallback
+    client.on_connect    = on_connect
+    client.on_message    = on_message
+    client.on_disconnect = on_disconnect
+
+    def _run():
+        import time as _time
+        delay = 5
+        while True:
+            try:
+                client.connect(host, port, keepalive=60)
+                client.loop_forever()
+                # loop_forever returns only on explicit disconnect
+            except Exception as exc:
+                print(f"[sensors] MQTT error: {exc} — retrying in {delay}s")
+            _time.sleep(delay)
+            delay = min(delay * 2, 60)   # exponential back-off, cap at 60s
+
+    threading.Thread(target=_run, daemon=True, name="mqtt-subscriber").start()
 
 
 # ---------------------------------------------------------------------------
-# Public interface — swap this body when the real API is ready
+# Public API
 # ---------------------------------------------------------------------------
 
-def get_sensor_reading(container_id: str) -> dict:
-    """Return the latest sensor readings for *container_id*.
+def get_sensor_reading(container_id: str) -> dict[str, Any]:
+    """Return latest cached MQTT reading for a container.
 
-    Currently returns realistic mock values for a healthy spirulina culture.
-    Replace with a real HTTP/MQTT call when the IoT platform is available:
-
-        resp = requests.get(f"{SENSOR_API_URL}/containers/{container_id}/latest",
-                            headers={"Authorization": f"Bearer {API_TOKEN}"})
-        return resp.json()
+    Returns empty dict if no reading has been received yet.
+    Callers should treat empty dict as 'no data' rather than an error.
     """
     if not container_id:
         return {}
-
-    ts = datetime.now(timezone.utc).isoformat()
-
-    # ── Named test containers with static, scenario-specific values ──────────
-    _FAKE_CONTAINERS: dict[str, dict] = {
-        # Healthy culture — all values in optimal range
-        "test-healthy": {
-            "ph": 9.5, "temperature_c": 33.0, "od680": 0.85,
-            "conductivity_ms": 2.5, "dissolved_o2_pct": 95.0,
-            "light_lux": 10_000, "co2_ppm": 480,
-            "timestamp": ts, "status": "ok",
-        },
-        # Harvest-ready — OD680 at upper optimal, stable for days
-        "test-harvest-ready": {
-            "ph": 9.6, "temperature_c": 33.5, "od680": 1.15,
-            "conductivity_ms": 2.8, "dissolved_o2_pct": 98.0,
-            "light_lux": 11_000, "co2_ppm": 460,
-            "timestamp": ts, "status": "ok",
-        },
-        # pH crash — dangerously low, needs bicarbonate addition
-        "test-ph-crash": {
-            "ph": 7.2, "temperature_c": 32.0, "od680": 0.70,
-            "conductivity_ms": 2.5, "dissolved_o2_pct": 78.0,
-            "light_lux": 9_500, "co2_ppm": 720,
-            "timestamp": ts, "status": "warning",
-        },
-        # Heat stress — temperature too high
-        "test-heat-stress": {
-            "ph": 9.4, "temperature_c": 41.5, "od680": 0.60,
-            "conductivity_ms": 2.8, "dissolved_o2_pct": 65.0,
-            "light_lux": 14_000, "co2_ppm": 390,
-            "timestamp": ts, "status": "warning",
-        },
-        # Salt build-up — EC too high (4.8 mS/cm = 4800 µS/cm)
-        "test-high-ec": {
-            "ph": 9.3, "temperature_c": 33.0, "od680": 0.55,
-            "conductivity_ms": 4.8, "dissolved_o2_pct": 80.0,
-            "light_lux": 9_000, "co2_ppm": 430,
-            "timestamp": ts, "status": "warning",
-        },
-        # Multiple anomalies — pH low + heat + low O2
-        "test-multi-anomaly": {
-            "ph": 7.8, "temperature_c": 40.0, "od680": 0.40,
-            "conductivity_ms": 4.0, "dissolved_o2_pct": 55.0,
-            "light_lux": 13_000, "co2_ppm": 850,
-            "timestamp": ts, "status": "error",
-        },
-    }
-
-    if container_id == "test-rotating":
-        slot = int(time.time()) // _ROTATING_INTERVAL % len(_ROTATING_SLOTS)
-        data = dict(_ROTATING_SLOTS[slot])
-        data["timestamp"] = ts
-        print(f"  [sensors] test-rotating slot {slot} -> status={data['status']}")
-        return data
-
-    if container_id in _FAKE_CONTAINERS:
-        return _FAKE_CONTAINERS[container_id]
-
-    # Fallback: deterministic random values for any other container_id
-    rng = random.Random(container_id)
-    return {
-        "ph":               round(rng.uniform(9.0, 9.8), 2),
-        "temperature_c":    round(rng.uniform(30.0, 34.0), 1),
-        "od680":            round(rng.uniform(0.6, 1.2), 3),
-        "conductivity_ms":  round(rng.uniform(18.0, 22.0), 1),
-        "dissolved_o2_pct": round(rng.uniform(85.0, 105.0), 1),
-        "light_lux":        round(rng.uniform(8_000, 12_000), 0),
-        "co2_ppm":          round(rng.uniform(380, 600), 0),
-        "timestamp":        datetime.now(timezone.utc).isoformat(),
-        "status":           "ok",
-    }
+    with _lock:
+        return dict(_cache.get(container_id, {}))
 
 
-def sensor_to_ml_input(reading: dict) -> dict:
-    """Convert agent sensor schema to anomaly model input schema.
+def get_history(container_id: str, n: int = 7) -> list[dict]:
+    """Return the last n readings from the DB for ML model inference.
 
-    Agent schema              ML model schema
-    -----------------------------------------
-    ph                   ->   ph           (same)
-    temperature_c (C)    ->   temp         (rename)
-    conductivity_ms mS   ->   ec µS/cm     (* 1000)
-    dissolved_o2_pct %   ->   do_mg mg/L   (/ 100 * 7.4  at ~33 C)
-    light_lux            ->   lux          (same)
-    od680 (biomass)      ->   turbidity    (* 400 NTU, rough proxy)
+    Fetches latest 6 stored readings + the newest MQTT reading (current cache).
+    Returns oldest-first with keys: date, pH, EC, DO, temperature, luminosity, turbidity.
+
+    n=7 gives M3 enough history (min 6) while including today's live reading.
     """
-    from datetime import datetime, timezone
-    ts = reading.get("timestamp") or datetime.now(timezone.utc).isoformat()
-    return {
-        "timestamp": ts,
-        "ph":        float(reading.get("ph",               9.5)),
-        "ec":        float(reading.get("conductivity_ms",  2.0))  * 1000.0,
-        "do_mg":     float(reading.get("dissolved_o2_pct", 90.0)) / 100.0 * 7.4,
-        "temp":      float(reading.get("temperature_c",    33.0)),
-        "turbidity": float(reading.get("od680",            0.5))  * 400.0,
-        "lux":       float(reading.get("light_lux",        10_000.0)),
-    }
+    from data.store import sensor_store
+
+    # Last n-1 from DB (persistent history)
+    rows = sensor_store.get_latest(container_id, n=n - 1)
+
+    # Append current live reading from MQTT cache if available
+    with _lock:
+        live = _cache.get(container_id)
+    if live:
+        live_row = _to_history_row(live)
+        # Avoid duplicating if DB already has this timestamp
+        if not rows or rows[-1]["date"] != live_row["date"]:
+            rows.append(live_row)
+
+    return rows
 
 
 def format_sensor_summary(reading: dict) -> str:
-    """Format sensor readings into a compact human-readable string for the LLM."""
+    """Format a sensor reading as a compact string for the LLM system prompt."""
     if not reading:
         return ""
-    lines = []
-    if "ph"               in reading: lines.append(f"pH: {reading['ph']}")
-    if "temperature_c"    in reading: lines.append(f"Temperature: {reading['temperature_c']} C")
-    if "od680"            in reading: lines.append(f"OD680 (biomass): {reading['od680']}")
-    if "conductivity_ms"  in reading: lines.append(f"Conductivity: {reading['conductivity_ms']} mS/cm")
-    if "dissolved_o2_pct" in reading: lines.append(f"Dissolved O2: {reading['dissolved_o2_pct']}%")
-    if "light_lux"        in reading: lines.append(f"Light: {reading['light_lux']} lux")
-    if "co2_ppm"          in reading: lines.append(f"CO2: {reading['co2_ppm']} ppm")
-    if "timestamp"        in reading: lines.append(f"Recorded: {reading['timestamp']}")
-    return "\n".join(lines)
+    parts = []
+    if "pH"          in reading: parts.append(f"pH: {reading['pH']}")
+    if "temperature" in reading: parts.append(f"Temp: {reading['temperature']} C")
+    if "turbidity"   in reading: parts.append(f"Turbidity: {reading['turbidity']} NTU")
+    if "EC"          in reading: parts.append(f"EC: {reading['EC']} uS/cm")
+    if "DO"          in reading: parts.append(f"DO: {reading['DO']} mg/L")
+    if "luminosity"  in reading: parts.append(f"Luminosity: {reading['luminosity']} lux")
+    if "status"      in reading: parts.append(f"Status: {reading['status']}")
+    if "timestamp"   in reading: parts.append(f"Recorded: {reading['timestamp']}")
+    return " | ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _to_history_row(reading: dict) -> dict:
+    """Convert a raw MQTT reading to the unified row format for M1/M2/M3."""
+    return {
+        "date":        reading.get("timestamp", datetime.now(timezone.utc).isoformat()),
+        "pH":          float(reading.get("pH",          9.5)),
+        "EC":          float(reading.get("EC",          2000.0)),
+        "DO":          float(reading.get("DO",          6.6)),
+        "temperature": float(reading.get("temperature", 33.0)),
+        "luminosity":  float(reading.get("luminosity",  10000.0)),
+        "turbidity":   float(reading.get("turbidity",   200.0)),
+    }
+
+
+def _parse_broker_url(url: str) -> tuple[str, int]:
+    """Parse mqtt://host:port or mqtts://host:port into (host, port)."""
+    clean = url.replace("mqtts://", "").replace("mqtt://", "")
+    if ":" in clean:
+        host, port_str = clean.rsplit(":", 1)
+        return host, int(port_str)
+    return clean, 1883

@@ -1,0 +1,18 @@
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap');
+
+@import "tailwindcss";
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+::-webkit-scrollbar       { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #28402A; border-radius: 99px; }
+
+@keyframes blink  { 0%,100%{opacity:1} 50%{opacity:.2} }
+@keyframes fadein { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+@keyframes glow   { 0%,100%{box-shadow:0 0 0 0 #2ECC5222} 60%{box-shadow:0 0 0 7px transparent} }
+@keyframes spin   { to{transform:rotate(360deg)} }
+
+.msg-enter { animation: fadein .28s ease forwards; }
+input  { outline: none; }
+button { cursor: pointer; font-family: inherit; }

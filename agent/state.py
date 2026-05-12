@@ -13,6 +13,7 @@ class AgentState(TypedDict, total=False):
     user_id: str
     container_id: str
     has_container: bool
+    tier: str           # "free" | "pro"
 
     # intent classification
     intent: str
@@ -21,8 +22,16 @@ class AgentState(TypedDict, total=False):
     # RAG
     rag_context: str
 
+    # sensor + ML
+    last_sensor_state: dict   # latest MQTT reading
+    ml_outputs: dict          # merged M1/M2/M3 results
+    tools_used: list[str]     # tool names shown in the UI pill row
+
+    # structured response for frontend rendering
+    content: dict             # {type: "text"|"diagnosis"|"harvest"|"phases", ...}
+
     # conversation
     chat_history: Annotated[list[dict], operator.add]
 
-    # final answer
+    # final answer (markdown — kept for LLM chain compatibility)
     response: str
