@@ -1,0 +1,36 @@
+# SpirulinaAI
+
+> An AI-powered cultivation assistant for spirulina (Arthrospira platensis) farmers and researchers.
+
+SpirulinaAI combines a Retrieval-Augmented Generation (RAG) knowledge base, real-time IoT sensor monitoring, and machine learning models to help users cultivate, monitor, and harvest spirulina microalgae efficiently.
+
+## What SpirulinaAI can help with
+
+- **Cultivation knowledge**: answers questions about spirulina biology, optimal growth conditions (pH 9–11, temperature 30–35°C, EC, luminosity), culture media (Zarrouk, SOT), and cultivation techniques drawn from 20+ scientific documents.
+- **Troubleshooting**: diagnoses common cultivation problems such as contamination, color changes, low turbidity, foam formation, and abnormal growth using a structured troubleshooting knowledge base.
+- **Sensor monitoring**: displays real-time readings for pH, electrical conductivity (EC), dissolved oxygen (DO), temperature, luminosity, and turbidity from connected IoT containers.
+- **Anomaly detection**: runs an LSTM autoencoder (M1) to detect abnormal sensor patterns and alert the farmer before problems escalate.
+- **Turbidity prediction**: uses a LightGBM model (M2) to predict culture density from multivariate sensor data.
+- **Harvest scheduling**: uses a LightGBM model (M3) to recommend optimal harvest timing based on current culture state.
+- **Proactive alerts**: pushes real-time threshold alerts (pH out of range, temperature spike, etc.) to connected users via Server-Sent Events.
+
+## Technology
+
+- Frontend: Next.js 16 (React 19, Tailwind CSS 4) — Progressive Web App
+- Backend: FastAPI + LangGraph agent pipeline
+- LLMs: Groq-hosted Llama 3.3 70B (generation) and Llama 3.1 8B (intent routing)
+- RAG: ChromaDB vector store, BAAI/bge-m3 multilingual embeddings, BM25+dense hybrid retrieval
+- ML: scikit-learn, LightGBM, Keras (LSTM autoencoder)
+- Data: SQLite sensor store, Redis conversation memory
+
+## Intended users
+
+Spirulina farmers, aquaculture researchers, agri-tech developers, students studying microalgae cultivation.
+
+## Language support
+
+English and French (the RAG knowledge base contains documents in both languages).
+
+## Source
+
+Built by YassineMK0 as a capstone AI project combining IoT, RAG, and LLM orchestration for precision microalgae cultivation.

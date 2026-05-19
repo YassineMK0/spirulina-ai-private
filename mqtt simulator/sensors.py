@@ -111,7 +111,7 @@ def build_reading(scenario, step, total):
     }
 
 
-client = mqtt.Client()
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.connect(BROKER, PORT, 60)
 
 total_sent = 0
