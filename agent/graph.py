@@ -57,7 +57,7 @@ def _route_after_classify(state: AgentState) -> str:
     return "retrieve_rag"
 
 
-_REASONING_INTENTS = {"HARVEST", "SYSTEM"}
+_REASONING_INTENTS = {"HARVEST", "SYSTEM", "UPDATE"}
 
 
 # -- gate: after RAG — route by tier, container, and intent ---------------

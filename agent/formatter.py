@@ -131,18 +131,8 @@ def _alert_level_from_sensors(sensor: dict[str, Any]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def template_rag_answer(answer: str, rag_context: str = "") -> str:
-    """Wrap the LLM answer with optional source footnote."""
-    if not answer:
-        return ""
-    sources = _extract_sources(rag_context)
-    footer = ""
-    if sources:
-        source_list = " · ".join(
-            f'<span style="color:#52b788;font-style:italic">{s}</span>'
-            for s in sources[:4]
-        )
-        footer = f"\n\n---\n <small>Sources: {source_list}</small>"
-    return answer + footer
+    """Return the LLM answer as-is — no source footnote appended."""
+    return answer or ""
 
 
 # ---------------------------------------------------------------------------

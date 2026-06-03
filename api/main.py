@@ -3,12 +3,18 @@
 Start:
     .venv\\Scripts\\uvicorn api.main:app --reload --port 8000
 
-Endpoints:
-    POST   /chat                -> invoke LangGraph pipeline, return AI response
-    GET    /history/{user_id}   -> return stored chat history for a user
-    DELETE /history/{user_id}   -> clear chat history for a user
-    GET    /health              -> liveness check
-    GET    /alerts/{user_id}    -> SSE stream of proactive container alerts
+Endpoints
+---------
+    POST   /chat                                   -> invoke agent, return response
+    GET    /conversations/{user_id}                -> list conversations
+    POST   /conversations/{user_id}                -> create new conversation
+    DELETE /conversations/{user_id}/{conv_id}      -> delete conversation
+    GET    /conversations/{user_id}/{conv_id}      -> get messages for conversation
+    PATCH  /conversations/{user_id}/{conv_id}/title-> rename conversation
+    GET    /health                                 -> liveness check
+    GET    /alerts/{user_id}                       -> SSE proactive alerts
+    GET    /sensors/{container_id}                 -> latest sensor reading
+    GET    /models/{container_id}                  -> ML model outputs
 """
 
 from __future__ import annotations
@@ -18,7 +24,7 @@ import json
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -27,64 +33,38 @@ load_dotenv()
 
 
 # ---------------------------------------------------------------------------
-# Startup pre-warm — runs once when uvicorn starts, before first request
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# SSE alert queues — one asyncio.Queue per connected user
+# SSE alert queues
 # ---------------------------------------------------------------------------
 
 _alert_queues: dict[str, asyncio.Queue] = {}
-_event_loop = None   # captured at startup — used by scheduler thread to push alerts
+_event_loop = None
 
 
 def _push_alert(user_id: str, alert_text: str) -> None:
-    """Push an alert into the user's SSE queue (called from scheduler thread)."""
     q = _alert_queues.get(user_id)
     if q and _event_loop:
         _event_loop.call_soon_threadsafe(q.put_nowait, alert_text)
-        print(f"[monitor] alert pushed to {user_id}: {alert_text[:60]}...")
-    else:
-        print(f"[monitor] no SSE listener for {user_id} (queue={q is not None}, loop={_event_loop is not None})")
 
 
 def _background_warmup():
-    """Load bge-m3, BM25 index, and ML models in a background thread.
-
-    Runs after uvicorn is already accepting requests so the server is
-    immediately available.  First /chat request before this finishes will
-    trigger an on-demand load (slightly slower, but still works).
-    """
     try:
         from rag.retriever.retrieve import _get_collection, _get_bm25_index
         _get_collection()
         _get_bm25_index(None, None)
         print("[warmup] bge-m3 + BM25 ready")
     except Exception as e:
-        print(f"[warmup] retriever failed: {e}")
-
-    try:
-        from api.predict_lstm import load_artifact as load_m1
-        load_m1()
-        print("[warmup] M1 LSTM ready")
-    except Exception as e:
-        print(f"[warmup] M1 LSTM: {e}")
-
-    try:
-        from api.predict_lgbm import load_artifact as load_m2
-        load_m2()
-        print("[warmup] M2 LightGBM turbidity ready")
-    except Exception as e:
-        print(f"[warmup] M2 LightGBM: {e}")
-
-    try:
-        from api.predict_lgbm_harvest import load_artifacts as load_m3
-        load_m3()
-        print("[warmup] M3 LightGBM harvest ready")
-    except Exception as e:
-        print(f"[warmup] M3 LightGBM harvest: {e}")
-
-    print("[warmup] all models loaded")
+        print(f"[warmup] retriever: {e}")
+    for name, loader in [
+        ("M1 LSTM",           lambda: __import__("api.predict_lstm",          fromlist=["load_artifact"]).load_artifact()),
+        ("M2 LightGBM",       lambda: __import__("api.predict_lgbm",          fromlist=["load_artifact"]).load_artifact()),
+        ("M3 harvest",        lambda: __import__("api.predict_lgbm_harvest",  fromlist=["load_artifacts"]).load_artifacts()),
+    ]:
+        try:
+            loader()
+            print(f"[warmup] {name} ready")
+        except Exception as e:
+            print(f"[warmup] {name}: {e}")
+    print("[warmup] done")
 
 
 @asynccontextmanager
@@ -93,7 +73,6 @@ async def lifespan(app: FastAPI):
     global _event_loop
     _event_loop = asyncio.get_event_loop()
 
-    # Compile graph synchronously — fast, no model loading
     try:
         from agent.graph import graph as _g
         global _graph
@@ -102,56 +81,44 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[startup] graph failed: {e}")
 
-    # bge-m3 + ML models in background — server accepts requests immediately
     threading.Thread(target=_background_warmup, daemon=True, name="warmup").start()
-    print("[startup] ready — bge-m3 loading in background (first request may be slow)")
 
     try:
         from agent.sensors import start_mqtt_subscriber
         start_mqtt_subscriber()
         print("[startup] MQTT subscriber started")
     except Exception as e:
-        print(f"[startup] MQTT subscriber: {e}")
+        print(f"[startup] MQTT: {e}")
 
-    # Start APScheduler — monitor fires every 5 minutes 
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         from agent.monitor import run_monitor_check
-
         scheduler = BackgroundScheduler()
-        scheduler.add_job(
-            lambda: run_monitor_check(_push_alert),
-            "interval",
-            seconds=15,
-            id="container_monitor",
-        )
+        scheduler.add_job(lambda: run_monitor_check(_push_alert), "interval", seconds=15)
         scheduler.start()
-        print("[startup] monitor scheduler started (every 5 min)")
+        print("[startup] monitor scheduler started")
     except Exception as e:
-        print(f"[startup] scheduler failed: {e}")
+        print(f"[startup] scheduler: {e}")
+        scheduler = None
 
-    print("[startup] ready — first message will be fast")
-    yield  # app runs here
+    print("[startup] ready")
+    yield
 
-    # Shutdown scheduler cleanly
     try:
-        scheduler.shutdown(wait=False)
+        if scheduler:
+            scheduler.shutdown(wait=False)
     except Exception:
         pass
 
 
-app = FastAPI(title="SpirulinaAI", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="SpirulinaAI", version="2.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST", "GET", "DELETE"],
+    allow_methods=["POST", "GET", "DELETE", "PATCH"],
     allow_headers=["*"],
 )
-
-# ---------------------------------------------------------------------------
-# Graph singleton
-# ---------------------------------------------------------------------------
 
 _graph = None
 
@@ -168,27 +135,34 @@ def _get_graph():
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
-    message:      str
-    user_id:      str  = "anonymous"
-    container_id: str  = ""
-    tier:         str  = "free"   # "free" | "pro"
+    message:         str
+    user_id:         str   = "anonymous"
+    container_id:    str   = ""
+    tier:            str   = "free"
+    conversation_id: str   = ""      # empty = create new conversation automatically
 
 
 class ChatResponse(BaseModel):
-    response:   str
-    content:    dict  = {}        # structured content for Next.js renderer
-    tools_used: list  = []        # tool pill labels shown in the UI
-    intent:     str   = ""
-    confidence: float = 0.0
+    response:        str
+    content:         dict  = {}
+    tools_used:      list  = []
+    intent:          str   = ""
+    confidence:      float = 0.0
+    plan:            str   = ""
+    tool_calls:      list  = []
+    conversation_id: str   = ""      # always returned so frontend can track it
 
 
-class HistoryMessage(BaseModel):
-    role:    str   # "user" | "assistant"
-    content: str
+class ConversationCreate(BaseModel):
+    title: str = "New conversation"
+
+
+class TitleUpdate(BaseModel):
+    title: str
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Health
 # ---------------------------------------------------------------------------
 
 @app.get("/health")
@@ -196,103 +170,74 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/models/{container_id}")
-def get_model_outputs(container_id: str):
-    """Run M1/M2/M3 on latest sensor history and return live outputs."""
-    import numpy as np
-    import pandas as pd
-    from agent.sensors import get_history
+# ---------------------------------------------------------------------------
+# Conversation CRUD
+# ---------------------------------------------------------------------------
 
-    history = get_history(container_id)
-    if not history:
-        return JSONResponse(
-            content={"error": "no_data"},
-            headers={"Cache-Control": "no-store"},
-        )
-
-    df     = pd.DataFrame(history)
-    result = {"m1": {}, "m2": {}, "m3": {}, "readings": len(history)}
-
-    try:
-        from api.predict_lstm import predict_df, load_artifact as load_m1
-        out  = predict_df(df, load_m1())
-        last = out.iloc[-1]
-        score = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
-        result["m1"] = {
-            "anomaly":  bool(last["is_anomaly"]),
-            "score":    round(score, 4),
-            "severity": str(last["severity"]),
-            "trend":    str(last["trend_direction"]),
-        }
-    except Exception as exc:
-        result["m1"] = {"error": str(exc)}
-
-    try:
-        from api.predict_lgbm import predict, load_artifact as load_m2
-        out = predict(df, load_m2())
-        result["m2"] = {
-            "low":        round(out["low"], 1),
-            "prediction": round(out["prediction"], 1),
-            "high":       round(out["high"], 1),
-        }
-    except Exception as exc:
-        result["m2"] = {"error": str(exc)}
-
-    try:
-        from api.predict_lgbm_harvest import schedule, load_artifacts as load_m3
-        m3_art, m2_art = load_m3()
-        out = schedule(df, m3_art, m2_art)
-        today = out.get("today", {})
-        result["m3"] = {
-            "recommendation": out.get("recommendation", "—"),
-            "harvest_pct":    today.get("harvest_pct", 0),
-            "confidence":     today.get("confidence", 0),
-            "tomorrow_pct":   out.get("tomorrow", {}).get("harvest_pct", 0),
-        }
-    except Exception as exc:
-        result["m3"] = {"error": str(exc)}
-
-    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+@app.get("/conversations/{user_id}")
+def list_conversations(user_id: str):
+    """Return all conversations for a user, newest first."""
+    from data.conversations import conversation_store
+    return conversation_store.list_conversations(user_id)
 
 
-@app.get("/sensors/{container_id}")
-def get_sensors(container_id: str):
-    """Return the latest sensor reading — live MQTT cache, or latest SQLite row as fallback."""
-    from agent.sensors import get_sensor_reading
-    from data.store import sensor_store
+@app.post("/conversations/{user_id}", status_code=201)
+def create_conversation(user_id: str, body: ConversationCreate):
+    """Explicitly create a new conversation (title can be set later)."""
+    from data.conversations import conversation_store
+    cid = conversation_store.create_conversation(user_id, body.title)
+    return {"id": cid, "title": body.title}
 
-    data = get_sensor_reading(container_id)
-    if not data:
-        rows = sensor_store.get_latest(container_id, n=1)
-        if rows:
-            r = rows[0]
-            data = {
-                "pH":          r.get("pH"),
-                "EC":          r.get("EC"),
-                "DO":          r.get("DO"),
-                "temperature": r.get("temperature"),
-                "luminosity":  r.get("luminosity"),
-                "turbidity":   r.get("turbidity"),
-                "timestamp":   r.get("date"),
-                "status":      "ok",
-                "source":      "db",
-            }
 
-    return JSONResponse(content=data or {}, headers={"Cache-Control": "no-store"})
+@app.get("/conversations/{user_id}/{conv_id}")
+def get_conversation_messages(user_id: str, conv_id: str):
+    """Return the message list for one conversation."""
+    from data.conversations import conversation_store
+    if not conversation_store.conversation_exists(conv_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation_store.get_messages(conv_id)
 
+
+@app.delete("/conversations/{user_id}/{conv_id}")
+def delete_conversation(user_id: str, conv_id: str):
+    from data.conversations import conversation_store
+    conversation_store.delete_conversation(conv_id)
+    return {"status": "deleted"}
+
+
+@app.patch("/conversations/{user_id}/{conv_id}/title")
+def rename_conversation(user_id: str, conv_id: str, body: TitleUpdate):
+    from data.conversations import conversation_store
+    conversation_store.update_title(conv_id, body.title)
+    return {"status": "updated", "title": body.title}
+
+
+# ---------------------------------------------------------------------------
+# Chat
+# ---------------------------------------------------------------------------
 
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    from agent.memory import memory_store
+    from data.conversations import conversation_store, make_title
     from agent.monitor import register_session
 
-    # Track active session for proactive monitoring
     register_session(req.user_id, req.container_id)
 
-    # Load history from Redis, append new user message
-    history = memory_store.get(req.user_id)
+    # ── Resolve / create conversation ───────────────────────────────────────
+    conv_id = req.conversation_id.strip()
+    is_new  = False
+
+    if not conv_id or not conversation_store.conversation_exists(conv_id):
+        title   = make_title(req.message)
+        conv_id = conversation_store.create_conversation(req.user_id, title)
+        is_new  = True
+
+    # ── Load history and append user message ────────────────────────────────
+    history = conversation_store.get_messages(conv_id)
+    conversation_store.add_message(conv_id, "user", req.message)
     history.append({"role": "user", "content": req.message})
 
+    # ── Run LangGraph pipeline ───────────────────────────────────────────────
     result = _get_graph().invoke({
         "user_id":      req.user_id,
         "container_id": req.container_id,
@@ -304,10 +249,12 @@ def chat(req: ChatRequest):
     content    = result.get("content",    {"type": "text", "text": response})
     tools_used = result.get("tools_used", [])
     intent     = result.get("intent",     "")
-    confidence = result.get("confidence",  0.0)
+    confidence = float(result.get("confidence", 0.0))
+    plan       = result.get("plan",       "")
+    tool_calls = result.get("tool_calls", [])
 
-    history.append({"role": "assistant", "content": response})
-    memory_store.save(req.user_id, history)
+    # ── Persist assistant reply ──────────────────────────────────────────────
+    conversation_store.add_message(conv_id, "assistant", response)
 
     return ChatResponse(
         response=response,
@@ -315,14 +262,87 @@ def chat(req: ChatRequest):
         tools_used=tools_used,
         intent=intent,
         confidence=confidence,
+        plan=plan,
+        tool_calls=tool_calls,
+        conversation_id=conv_id,
     )
 
 
+# ---------------------------------------------------------------------------
+# Sensors / ML
+# ---------------------------------------------------------------------------
+
+@app.get("/sensors/{container_id}")
+def get_sensors(container_id: str):
+    from agent.sensors import get_sensor_reading
+    from data.store import sensor_store
+
+    data = get_sensor_reading(container_id)
+    if not data:
+        rows = sensor_store.get_latest(container_id, n=1)
+        if rows:
+            r    = rows[0]
+            data = {
+                "pH": r.get("pH"), "EC": r.get("EC"), "DO": r.get("DO"),
+                "temperature": r.get("temperature"), "luminosity": r.get("luminosity"),
+                "turbidity": r.get("turbidity"), "timestamp": r.get("date"),
+                "status": "ok", "source": "db",
+            }
+    return JSONResponse(content=data or {}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/models/{container_id}")
+def get_model_outputs(container_id: str):
+    import numpy as np
+    import pandas as pd
+    from agent.sensors import get_history
+
+    history = get_history(container_id)
+    if not history:
+        return JSONResponse(content={"error": "no_data"}, headers={"Cache-Control": "no-store"})
+
+    df     = pd.DataFrame(history)
+    result = {"m1": {}, "m2": {}, "m3": {}, "readings": len(history)}
+
+    try:
+        from api.predict_lstm import predict_df, load_artifact as load_m1
+        out  = predict_df(df, load_m1())
+        last = out.iloc[-1]
+        score = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
+        result["m1"] = {"anomaly": bool(last["is_anomaly"]), "score": round(score, 4),
+                        "severity": str(last["severity"]), "trend": str(last["trend_direction"])}
+    except Exception as exc:
+        result["m1"] = {"error": str(exc)}
+
+    try:
+        from api.predict_lgbm import predict, load_artifact as load_m2
+        out = predict(df, load_m2())
+        result["m2"] = {"low": round(out["low"], 1), "prediction": round(out["prediction"], 1),
+                        "high": round(out["high"], 1)}
+    except Exception as exc:
+        result["m2"] = {"error": str(exc)}
+
+    try:
+        from api.predict_lgbm_harvest import schedule, load_artifacts as load_m3
+        m3_art, m2_art = load_m3()
+        out   = schedule(df, m3_art, m2_art)
+        today = out.get("today", {})
+        result["m3"] = {"recommendation": out.get("recommendation", ""),
+                        "harvest_pct": today.get("harvest_pct", 0),
+                        "confidence":  today.get("confidence",  0),
+                        "tomorrow_pct": out.get("tomorrow", {}).get("harvest_pct", 0)}
+    except Exception as exc:
+        result["m3"] = {"error": str(exc)}
+
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------
+# SSE alerts
+# ---------------------------------------------------------------------------
+
 @app.get("/alerts/{user_id}")
 async def alerts_sse(user_id: str, container_id: str = ""):
-    """Server-Sent Events stream — pushes proactive alerts to the browser."""
-    # Register session immediately so the monitor starts watching this container
-    # even before the user sends a chat message.
     if container_id:
         from agent.monitor import register_session
         register_session(user_id, container_id)
@@ -332,15 +352,13 @@ async def alerts_sse(user_id: str, container_id: str = ""):
 
     async def event_stream():
         try:
-            # Send a heartbeat immediately so the browser knows the stream is open
-            yield "data: {\"type\": \"connected\"}\n\n"
+            yield 'data: {"type":"connected"}\n\n'
             while True:
                 try:
-                    alert_text = await asyncio.wait_for(q.get(), timeout=30.0)
-                    payload = json.dumps({"type": "alert", "text": alert_text})
+                    text    = await asyncio.wait_for(q.get(), timeout=30.0)
+                    payload = json.dumps({"type": "alert", "text": text})
                     yield f"data: {payload}\n\n"
                 except asyncio.TimeoutError:
-                    # Send keepalive comment every 30s to prevent connection drop
                     yield ": keepalive\n\n"
         finally:
             _alert_queues.pop(user_id, None)
@@ -348,23 +366,5 @@ async def alerts_sse(user_id: str, container_id: str = ""):
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control":  "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@app.get("/history/{user_id}", response_model=list[HistoryMessage])
-def get_history(user_id: str):
-    """Return the stored chat history for a user (for rendering on page load)."""
-    from agent.memory import memory_store
-    return memory_store.get(user_id)
-
-
-@app.delete("/history/{user_id}")
-def clear_history(user_id: str):
-    """Wipe the chat history for a user."""
-    from agent.memory import memory_store
-    memory_store.clear(user_id)
-    return {"status": "cleared"}

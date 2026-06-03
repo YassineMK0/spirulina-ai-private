@@ -1,5 +1,6 @@
 import "./globals.css";
 import ServiceWorkerRegistration from "@/components/ServiceWorkerRegistration";
+import { ThemeProvider } from "@/lib/ThemeContext";
 
 const BASE_URL = process.env.NEXT_PUBLIC_BASE_URL || "https://spirulina-ai.com";
 
@@ -103,7 +104,7 @@ export default function RootLayout({ children }) {
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
         <ServiceWorkerRegistration />
-        {children}
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

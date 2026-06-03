@@ -33,5 +33,9 @@ class AgentState(TypedDict, total=False):
     # conversation
     chat_history: Annotated[list[dict], operator.add]
 
+    # agentic fields
+    plan: str                  # markdown plan generated before tool execution
+    tool_calls: list[dict]     # log of {tool, args, result} for each tool call
+
     # final answer (markdown — kept for LLM chain compatibility)
     response: str

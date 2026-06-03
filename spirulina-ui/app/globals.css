@@ -1,18 +1,72 @@
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&family=Instrument+Serif:ital@0;1&display=swap');
 
 @import "tailwindcss";
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-::-webkit-scrollbar       { width: 3px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #28402A; border-radius: 99px; }
+html, body {
+  height: 100%;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
 
-@keyframes blink  { 0%,100%{opacity:1} 50%{opacity:.2} }
-@keyframes fadein { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
-@keyframes glow   { 0%,100%{box-shadow:0 0 0 0 #2ECC5222} 60%{box-shadow:0 0 0 7px transparent} }
-@keyframes spin   { to{transform:rotate(360deg)} }
+/* Default dark background so there's no flash */
+html { background: #000; color: #F5F5F5; }
+html[data-theme="light"] { background: #fff; color: #0A0A0A; }
 
-.msg-enter { animation: fadein .28s ease forwards; }
-input  { outline: none; }
-button { cursor: pointer; font-family: inherit; }
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar          { width: 4px; height: 4px; }
+::-webkit-scrollbar-track    { background: transparent; }
+::-webkit-scrollbar-thumb    { background: #333; border-radius: 99px; }
+html[data-theme="light"] ::-webkit-scrollbar-thumb { background: #D1D5DB; }
+
+/* ── Animations ──────────────────────────────────────────────────────────── */
+@keyframes blink   { 0%,100%{opacity:1}  50%{opacity:.15} }
+@keyframes fadein  { from{opacity:0;transform:translateY(5px)} to{opacity:1;transform:none} }
+@keyframes spin    { to{transform:rotate(360deg)} }
+@keyframes shimmer { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
+@keyframes pulse-glow {
+  0%,100% { box-shadow: 0 0 0 0 rgba(16,185,129,0.2); }
+  50%     { box-shadow: 0 0 0 8px rgba(16,185,129,0); }
+}
+@keyframes reveal {
+  from { opacity:0; transform:translateY(-3px); }
+  to   { opacity:1; transform:none; }
+}
+@keyframes slide-in {
+  from { opacity:0; transform:translateX(-6px); }
+  to   { opacity:1; transform:none; }
+}
+
+/* ── Utility ─────────────────────────────────────────────────────────────── */
+.msg-enter   { animation: fadein .22s ease forwards; }
+.plan-reveal { animation: reveal .18s ease forwards; }
+
+.skeleton {
+  background: linear-gradient(90deg,#161616 25%,#1C1C1E 50%,#161616 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 6px;
+}
+html[data-theme="light"] .skeleton {
+  background: linear-gradient(90deg,#F3F4F6 25%,#E5E7EB 50%,#F3F4F6 75%);
+  background-size: 200% 100%;
+}
+
+.scan-lines { position: relative; overflow: hidden; }
+.scan-lines::after {
+  content: "";
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.08) 3px,rgba(0,0,0,.08) 4px);
+  pointer-events: none;
+}
+
+/* ── Resets ──────────────────────────────────────────────────────────────── */
+input, textarea { outline: none; font-family: inherit; }
+button          { cursor: pointer; font-family: inherit; }
+
+/* ── Markdown body ───────────────────────────────────────────────────────── */
+.md-body p:last-child  { margin-bottom: 0; }
+.md-body ul, .md-body ol { list-style: none; padding: 0; }

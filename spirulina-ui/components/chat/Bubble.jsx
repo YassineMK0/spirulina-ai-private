@@ -1,147 +1,313 @@
 "use client";
-import { C } from "@/lib/theme";
-import { Dot, Label, AgentAvatar, ToolPills } from "@/components/atoms";
+import { useState } from "react";
+import { useTheme } from "@/lib/ThemeContext";
+import { AgentAvatar } from "@/components/atoms";
+import MarkdownRenderer from "@/components/chat/MarkdownRenderer";
 
-const SensorMini = ({ label, val, unit, opt, isAlert }) => {
-  const color = isAlert ? C.red : C.green;
+/* ── Sensor mini-card ───────────────────────────────────────────────────── */
+function SensorMini({ label, val, unit, opt, isAlert }) {
+  const { C } = useTheme();
   return (
-    <div style={{ flex: 1, minWidth: 68, padding: "6px 8px", borderRadius: 6, background: isAlert ? C.redSoft : C.card2, border: `1px solid ${isAlert ? "#4A1010" : C.border}` }}>
-      <div style={{ fontSize: 8, color: isAlert ? "#B06060" : C.text3, marginBottom: 2, fontFamily: C.mono }}>{label}{isAlert ? " ▲" : ""}</div>
-      <div style={{ fontSize: 14, fontWeight: 700, color, fontFamily: C.sans }}>{val}<span style={{ fontSize: 9, fontWeight: 400 }}>{unit}</span></div>
-      <div style={{ fontSize: 7.5, color: C.text3, fontFamily: C.mono }}>opt {opt}</div>
+    <div style={{
+      flex: "1 1 70px", padding: "8px 10px", borderRadius: 8,
+      background: isAlert ? `${C.redSoft}` : C.card2,
+      border: `1px solid ${isAlert ? C.red + "40" : C.border}`,
+    }}>
+      <div style={{ fontSize: 9, color: isAlert ? C.red : C.text3, marginBottom: 3, fontFamily: C.mono }}>
+        {label}{isAlert ? " ↑" : ""}
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: isAlert ? C.red : C.green, fontFamily: C.mono }}>
+        {val}<span style={{ fontSize: 10, fontWeight: 400, marginLeft: 1 }}>{unit}</span>
+      </div>
+      <div style={{ fontSize: 9, color: C.text3, fontFamily: C.mono, marginTop: 2 }}>opt {opt}</div>
     </div>
   );
-};
+}
 
-const DiagnosisContent = ({ content }) => (
-  <>
-    <div style={{ marginBottom: 9, fontSize: 11 }}>
-      <strong style={{ color: C.text }}>Root cause: </strong>{content.cause}
+/* ── Diagnosis card ─────────────────────────────────────────────────────── */
+function DiagnosisContent({ content }) {
+  const { C } = useTheme();
+  return (
+    <div>
+      {content.sensors?.length > 0 && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+          {content.sensors.map((s, i) => <SensorMini key={i} {...s} />)}
+        </div>
+      )}
+      <MarkdownRenderer content={content.cause} />
+      {content.action?.note && (
+        <div style={{
+          marginTop: 10, background: C.card2,
+          border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 13px",
+        }}>
+          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: 1.2, color: C.text3, fontFamily: C.mono, marginBottom: 6, textTransform: "uppercase" }}>
+            Recommended Action
+          </div>
+          <MarkdownRenderer content={content.action.note} />
+        </div>
+      )}
     </div>
-    {content.sensors?.length > 0 && (
-      <div style={{ display: "flex", gap: 5, marginBottom: 9, flexWrap: "wrap" }}>
-        {content.sensors.map((s, i) => <SensorMini key={i} {...s} />)}
-      </div>
-    )}
-    {content.action?.note && (
-      <div style={{ background: C.card2, border: `1px solid ${C.border2}`, borderRadius: 7, padding: "8px 11px" }}>
-        <Label>RECOMMENDED ACTION</Label>
-        {content.action.dose && <><span style={{ color: C.text }}>Add </span><strong style={{ color: C.green, fontSize: 13 }}>{content.action.dose}</strong><span style={{ color: C.text2 }}> — </span></>}
-        <span style={{ color: C.text2 }}>{content.action.note}</span>
-      </div>
-    )}
-  </>
-);
+  );
+}
 
-const HarvestContent = ({ content }) => {
-  const today = content.schedule?.today   || {};
-  const tmrw  = content.schedule?.tomorrow || {};
-  const d2    = content.schedule?.day_after || {};
-  const tf    = content.turbidity_forecast || {};
-
+/* ── Harvest card ───────────────────────────────────────────────────────── */
+function HarvestContent({ content }) {
+  const { C } = useTheme();
   const days = [
-    { key: "today",     data: today, label: "TODAY"     },
-    { key: "tomorrow",  data: tmrw,  label: "TOMORROW"  },
-    { key: "day_after", data: d2,    label: "DAY AFTER" },
+    { data: content.schedule?.today    || {}, label: "TODAY"     },
+    { data: content.schedule?.tomorrow  || {}, label: "TOMORROW"  },
+    { data: content.schedule?.day_after || {}, label: "DAY AFTER" },
   ];
-
   const best    = days.reduce((a, b) => (b.data.harvest_pct || 0) > (a.data.harvest_pct || 0) ? b : a, days[0]);
   const bestPct = best.data.harvest_pct || 0;
+  const tf      = content.turbidity_forecast || {};
 
   return (
-    <>
+    <div>
       {bestPct > 0 ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", background: C.greenSoft, border: "1px solid #234830", borderRadius: 8, marginBottom: 9 }}>
-          <div style={{ fontSize: 18 }}>⏳</div>
+        <div style={{
+          display: "flex", alignItems: "center", gap: 10,
+          padding: "10px 13px", background: C.greenSoft,
+          border: `1px solid ${C.green}30`, borderRadius: 10,
+          marginBottom: 12, boxShadow: C.glowSm,
+        }}>
           <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: C.green }}>
-              {best.key === "today" ? "Harvest today" : `Wait — harvest ${best.label.toLowerCase()}`}
+            <div style={{ fontSize: 13, fontWeight: 600, color: C.green }}>
+              {best.label === "TODAY" ? "Ready to harvest today" : `Best window — ${best.label.toLowerCase()}`}
             </div>
-            <div style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>
+            <div style={{ fontSize: 10, color: C.text3, fontFamily: C.mono, marginTop: 2 }}>
               {bestPct}% yield · M3 confidence {Math.round((best.data.confidence || 0) * 100)}%
             </div>
           </div>
         </div>
       ) : (
-        <div style={{ padding: "8px 10px", background: C.card2, borderRadius: 8, marginBottom: 9, fontSize: 11, color: C.text2 }}>
-          Culture not ready for harvest yet.
+        <div style={{ padding: "10px 13px", background: C.card2, borderRadius: 8, marginBottom: 12, fontSize: 13, color: C.text2 }}>
+          Culture not yet ready for harvest.
         </div>
       )}
 
-      <div style={{ fontSize: 11.5, color: C.text2, marginBottom: 9, lineHeight: 1.6 }}>{content.body}</div>
-
-      <div style={{ display: "flex", gap: 6, marginBottom: 9 }}>
-        {days.map((d, i) => (
-          <div key={i} style={{ flex: 1, background: d.key === best.key && bestPct > 0 ? C.greenSoft : C.card2, border: `1px solid ${d.key === best.key && bestPct > 0 ? "#234830" : C.border}`, borderRadius: 7, padding: "8px 10px", textAlign: "center" }}>
-            <div style={{ fontSize: 8.5, color: C.text3, fontFamily: C.mono, marginBottom: 3 }}>{d.label}</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: d.key === best.key && bestPct > 0 ? C.green : C.text, fontFamily: C.sans }}>{d.data.harvest_pct || 0}%</div>
-            <div style={{ fontSize: 8, color: C.text3, marginTop: 2 }}>{d.data.label || "not_ready"}</div>
-          </div>
-        ))}
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        {days.map((d, i) => {
+          const isTop = d.label === best.label && bestPct > 0;
+          return (
+            <div key={i} style={{
+              flex: 1, textAlign: "center",
+              background: isTop ? C.greenSoft : C.card2,
+              border: `1px solid ${isTop ? C.green + "40" : C.border}`,
+              borderRadius: 8, padding: "10px 6px",
+            }}>
+              <div style={{ fontSize: 9, color: C.text3, fontFamily: C.mono, marginBottom: 3 }}>{d.label}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: isTop ? C.green : C.text }}>
+                {d.data.harvest_pct || 0}%
+              </div>
+              <div style={{ fontSize: 9, color: C.text3, marginTop: 3, fontFamily: C.mono }}>{d.data.label || "not_ready"}</div>
+            </div>
+          );
+        })}
       </div>
 
+      {content.body && <MarkdownRenderer content={content.body} />}
+
       {content.recommendation && (
-        <div style={{ background: C.card2, border: `1px solid ${C.border2}`, borderRadius: 7, padding: "8px 10px", fontSize: 10.5, color: C.text2, lineHeight: 1.55 }}>
-          <Label>M3 RECOMMENDATION</Label>
-          {content.recommendation}
+        <div style={{ marginTop: 10, background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px" }}>
+          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: 1.2, color: C.text3, fontFamily: C.mono, marginBottom: 5, textTransform: "uppercase" }}>
+            M3 Recommendation
+          </div>
+          <div style={{ fontSize: 13, color: C.text2, lineHeight: 1.55 }}>{content.recommendation}</div>
         </div>
       )}
 
       {tf.prediction && (
-        <div style={{ marginTop: 8, background: C.card2, border: `1px solid ${C.border2}`, borderRadius: 7, padding: "8px 10px" }}>
-          <Label>M2 TURBIDITY FORECAST (TOMORROW)</Label>
+        <div style={{ marginTop: 10, background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px" }}>
+          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: 1.2, color: C.text3, fontFamily: C.mono, marginBottom: 8, textTransform: "uppercase" }}>
+            M2 Turbidity Forecast — Tomorrow
+          </div>
           <div style={{ display: "flex", gap: 8 }}>
-            {[["LOW", tf.low], ["PREDICTED", tf.prediction], ["HIGH", tf.high]].map(([lbl, v], i) => (
+            {[["Low", tf.low], ["Predicted", tf.prediction], ["High", tf.high]].map(([lbl, v], i) => (
               <div key={i} style={{ flex: 1, textAlign: "center" }}>
-                <div style={{ fontSize: 7.5, color: C.text3, fontFamily: C.mono }}>{lbl}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: i === 1 ? C.green : C.text2 }}>{v?.toFixed(1)}</div>
-                <div style={{ fontSize: 7.5, color: C.text3, fontFamily: C.mono }}>NTU</div>
+                <div style={{ fontSize: 9, color: C.text3, fontFamily: C.mono }}>{lbl}</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: i === 1 ? C.green : C.text2 }}>
+                  {typeof v === "number" ? v.toFixed(1) : (v ?? "—")}
+                </div>
+                <div style={{ fontSize: 9, color: C.text3, fontFamily: C.mono }}>NTU</div>
               </div>
             ))}
           </div>
         </div>
       )}
-    </>
+    </div>
   );
-};
+}
 
+/* ── Tool call log ──────────────────────────────────────────────────────── */
+function ToolCallLog({ calls }) {
+  const { C } = useTheme();
+  const [open, setOpen] = useState(false);
+  if (!calls?.length) return null;
+  return (
+    <div style={{ borderTop: `1px solid ${C.border}`, background: C.card2 }}>
+      <button onClick={() => setOpen(!open)} style={{
+        width: "100%", display: "flex", alignItems: "center", gap: 8,
+        padding: "6px 14px", background: "none", border: "none", textAlign: "left",
+      }}>
+        <span style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>
+          {open ? "▾" : "▸"} Tool calls ({calls.length})
+        </span>
+      </button>
+      {open && (
+        <div className="plan-reveal" style={{ padding: "0 14px 10px", display: "flex", flexDirection: "column", gap: 5 }}>
+          {calls.map((tc, i) => (
+            <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 6, padding: "7px 10px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 500, color: C.teal, fontFamily: C.mono, marginBottom: tc.args && Object.keys(tc.args).length ? 4 : 0 }}>
+                ⚡ {tc.tool}
+              </div>
+              {tc.args && Object.keys(tc.args).length > 0 && (
+                <div style={{ fontSize: 10.5, fontFamily: C.mono, color: C.text3, lineHeight: 1.6 }}>
+                  {Object.entries(tc.args).map(([k, v]) => (
+                    <span key={k} style={{ marginRight: 10 }}>
+                      <span style={{ color: C.text3 }}>{k}=</span>
+                      <span style={{ color: C.green }}>{String(v)}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Main Bubble ────────────────────────────────────────────────────────── */
 export default function Bubble({ msg }) {
+  const { C } = useTheme();
+  const [planOpen, setPlanOpen] = useState(false);
   const t = msg.time || "";
 
-  if (msg.role === "alert") return (
-    <div className="msg-enter" style={{ background: C.redSoft, border: "1px solid #4A1010", borderRadius: 10, padding: "10px 13px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-        <Dot color={C.red} blink />
-        <span style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: 1, color: "#A04040", fontFamily: C.mono }}>SSE ALERT · M1 ANOMALY DETECTOR</span>
-        <span style={{ marginLeft: "auto", fontSize: 8, color: C.text3, fontFamily: C.mono }}>{t}</span>
-      </div>
-      <div style={{ fontSize: 12.5, fontWeight: 700, color: C.red }}>{msg.text}</div>
-    </div>
-  );
-
-  if (msg.role === "user") return (
-    <div className="msg-enter" style={{ display: "flex", justifyContent: "flex-end" }}>
-      <div style={{ maxWidth: "78%", padding: "9px 13px", borderRadius: "12px 12px 3px 12px", background: C.greenSoft, border: "1px solid #234830", color: "#C0EED0", fontSize: 12.5, lineHeight: 1.55 }}>
-        {msg.text}
-        <div style={{ fontSize: 8, color: C.text3, fontFamily: C.mono, marginTop: 4, textAlign: "right" }}>{t}</div>
-      </div>
-    </div>
-  );
-
-  if (msg.role === "agent") {
-    const content = msg.content || { type: "text", text: msg.text || "" };
+  /* Alert */
+  if (msg.role === "alert") {
     return (
-      <div className="msg-enter" style={{ display: "flex", gap: 9 }}>
+      <div className="msg-enter scan-lines" style={{
+        background: C.redSoft, border: `1px solid ${C.red}30`,
+        borderRadius: 10, padding: "11px 14px",
+        boxShadow: C.redGlow, position: "relative", overflow: "hidden",
+      }}>
+        <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, ${C.red}, transparent)` }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 5 }}>
+          <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.red, animation: "blink 1.2s infinite", flexShrink: 0 }} />
+          <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: 1, color: C.red, fontFamily: C.mono, textTransform: "uppercase" }}>
+            Anomaly Alert
+          </span>
+          <span style={{ marginLeft: "auto", fontSize: 9, color: C.text3, fontFamily: C.mono }}>{t}</span>
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 500, color: C.text, lineHeight: 1.5 }}>{msg.text}</div>
+      </div>
+    );
+  }
+
+  /* User */
+  if (msg.role === "user") {
+    return (
+      <div className="msg-enter" style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div style={{
+          maxWidth: "72%", padding: "10px 14px",
+          borderRadius: "14px 14px 3px 14px",
+          background: C.card2, border: `1px solid ${C.border2}`,
+          color: C.text, fontSize: 13.5, lineHeight: 1.6,
+          boxShadow: C.cardShadow,
+        }}>
+          {msg.text}
+          <div style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono, marginTop: 6, textAlign: "right" }}>{t}</div>
+        </div>
+      </div>
+    );
+  }
+
+  /* Agent */
+  if (msg.role === "agent") {
+    const content   = msg.content   || { type: "text", text: msg.text || "" };
+    const plan      = msg.plan      || "";
+    const toolCalls = msg.tool_calls || [];
+    const tools     = msg.tools     || [];
+    const isAgentic = toolCalls.length > 0;
+
+    return (
+      <div className="msg-enter" style={{ display: "flex", gap: 10 }}>
         <AgentAvatar />
         <div style={{ flex: 1, minWidth: 0 }}>
-          <ToolPills tools={msg.tools} />
-          <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: "3px 12px 12px 12px", padding: "11px 13px", fontSize: 12, lineHeight: 1.65, color: C.text2 }}>
-            {content.type === "diagnosis" && <DiagnosisContent content={content} />}
-            {content.type === "harvest"   && <HarvestContent content={content} />}
-            {(content.type === "text" || !content.type) && (
-              <div style={{ color: C.text2, lineHeight: 1.7 }}>{content.text || msg.text}</div>
+          <div style={{
+            background: C.card, border: `1px solid ${C.border}`,
+            borderRadius: "3px 12px 12px 12px",
+            overflow: "hidden", boxShadow: C.cardShadow,
+          }}>
+            {/* Top accent line */}
+            <div style={{ height: 1, background: C.gradientTop }} />
+
+            {/* Header */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "7px 14px", borderBottom: `1px solid ${C.border}`,
+              background: C.card2,
+            }}>
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: C.text }}>SpirulinaAI</span>
+
+              {isAgentic && (
+                <span style={{
+                  fontSize: 9.5, padding: "2px 7px", borderRadius: 4,
+                  background: `${C.teal}14`, color: C.teal,
+                  border: `1px solid ${C.teal}30`, fontFamily: C.mono,
+                }}>
+                  ⚡ agentic · {toolCalls.length} tool{toolCalls.length !== 1 ? "s" : ""}
+                </span>
+              )}
+
+              {!isAgentic && tools.length > 0 && (
+                <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+                  {tools.slice(0, 5).map((tool, i) => (
+                    <span key={i} style={{
+                      fontSize: 9.5, padding: "1px 6px", borderRadius: 4,
+                      background: C.panel, color: C.text3,
+                      border: `1px solid ${C.border}`, fontFamily: C.mono,
+                    }}>{tool}</span>
+                  ))}
+                </div>
+              )}
+
+              <span style={{ marginLeft: "auto", fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>{t}</span>
+            </div>
+
+            {/* Plan panel */}
+            {plan && (
+              <div style={{ borderBottom: `1px solid ${C.border}` }}>
+                <button onClick={() => setPlanOpen(!planOpen)} style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: 8,
+                  padding: "7px 14px", background: "none", border: "none",
+                }}>
+                  <span style={{ fontSize: 9.5, fontWeight: 500, color: C.text3, fontFamily: C.mono }}>
+                    {planOpen ? "▾" : "▸"} Agent plan
+                  </span>
+                  <div style={{ flex: 1, height: 1, background: C.border }} />
+                </button>
+                {planOpen && (
+                  <div className="plan-reveal" style={{ padding: "4px 14px 12px" }}>
+                    <MarkdownRenderer content={plan} dimmed />
+                  </div>
+                )}
+              </div>
             )}
-            <div style={{ fontSize: 8, color: C.text3, fontFamily: C.mono, marginTop: 8, textAlign: "right" }}>{t}</div>
+
+            {/* Main content */}
+            <div style={{ padding: "13px 14px" }}>
+              {content.type === "diagnosis" && <DiagnosisContent content={content} />}
+              {content.type === "harvest"   && <HarvestContent   content={content} />}
+              {(content.type === "text" || !content.type) && (
+                <MarkdownRenderer content={content.text || msg.text || ""} />
+              )}
+            </div>
+
+            {/* Tool call log */}
+            {isAgentic && <ToolCallLog calls={toolCalls} />}
           </div>
         </div>
       </div>

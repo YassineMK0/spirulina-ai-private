@@ -1,35 +1,49 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
-import { C } from "@/lib/theme";
+import { useTheme } from "@/lib/ThemeContext";
 import { AgentAvatar, SpinnerDots } from "@/components/atoms";
 import Bubble from "@/components/chat/Bubble";
-import { sendMessage, getHistory } from "@/lib/api";
+import { sendMessage, getConversationMessages } from "@/lib/api";
 
-export default function AgentChat({ userId, containerId, tier, incomingAlerts = [] }) {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput]       = useState("");
-  const [thinking, setThinking] = useState(false);
-  const bottomRef = useRef(null);
-  const idRef     = useRef(1);
+export default function AgentChat({
+  userId,
+  containerId,
+  tier,
+  conversationId      = null,
+  incomingAlerts      = [],
+  onConversationCreated,
+  onMessageSent,
+}) {
+  const { C } = useTheme();
+  const [messages,   setMessages]   = useState([]);
+  const [input,      setInput]      = useState("");
+  const [thinking,   setThinking]   = useState(false);
+  const [activeConv, setActiveConv] = useState(conversationId);
+
+  const bottomRef      = useRef(null);
+  const idRef          = useRef(1);
   const prevAlertCount = useRef(0);
+  const textareaRef    = useRef(null);
 
   const now = () => new Date().toTimeString().slice(0, 5);
 
-  // Load history on mount
+  /* Load history */
   useEffect(() => {
-    getHistory(userId).then((history) => {
-      const loaded = history.map((m) => ({
+    setMessages([]);
+    setActiveConv(conversationId);
+    if (!conversationId) return;
+    getConversationMessages(userId, conversationId).then((history) => {
+      setMessages(history.map((m) => ({
         id:      idRef.current++,
         role:    m.role === "assistant" ? "agent" : "user",
         text:    m.content,
         content: { type: "text", text: m.content },
         time:    "",
-      }));
-      setMessages(loaded);
+      })));
     });
-  }, [userId]);
+  }, [conversationId, userId]);
 
-  // Inject SSE alerts from ProShell into the chat message list
+  /* SSE alerts */
   useEffect(() => {
     if (incomingAlerts.length <= prevAlertCount.current) return;
     const newAlerts = incomingAlerts.slice(prevAlertCount.current);
@@ -40,96 +54,158 @@ export default function AgentChat({ userId, containerId, tier, incomingAlerts = 
     ]);
   }, [incomingAlerts]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, thinking]);
+  /* Auto-scroll */
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, thinking]);
 
+  /* Send */
   const send = async () => {
     const text = input.trim();
     if (!text || thinking) return;
-
     const t = now();
     setMessages((m) => [...m, { id: idRef.current++, role: "user", text, time: t }]);
     setInput("");
+    if (textareaRef.current) { textareaRef.current.style.height = "auto"; }
     setThinking(true);
-
     try {
-      const res = await sendMessage({ message: text, userId, containerId, tier });
+      const res = await sendMessage({ message: text, userId, containerId, tier, conversationId: activeConv || "" });
+      if (!activeConv && res.conversation_id) {
+        setActiveConv(res.conversation_id);
+        onConversationCreated?.(res.conversation_id);
+      } else {
+        onMessageSent?.();
+      }
       setMessages((m) => [...m, {
-        id:      idRef.current++,
-        role:    "agent",
-        text:    res.response,
-        content: res.content || { type: "text", text: res.response },
-        tools:   res.tools_used || [],
-        time:    t,
+        id: idRef.current++, role: "agent",
+        text: res.response,
+        content:    res.content    || { type: "text", text: res.response },
+        tools:      res.tools_used || [],
+        tool_calls: res.tool_calls || [],
+        plan:       res.plan       || "",
+        time: t,
       }]);
-    } catch (err) {
+    } catch {
       setMessages((m) => [...m, {
-        id:      idRef.current++,
-        role:    "agent",
-        text:    "Something went wrong. Please try again.",
+        id: idRef.current++, role: "agent",
+        text: "Something went wrong. Please try again.",
         content: { type: "text", text: "Something went wrong. Please try again." },
-        tools:   [],
-        time:    t,
+        tools: [], tool_calls: [], plan: "", time: t,
       }]);
     } finally {
       setThinking(false);
     }
   };
 
+  /* Empty-state prompts */
+  const prompts = tier === "pro"
+    ? ["My pH dropped to 8.1 overnight", "Should I harvest today?", "Culture turned pale yellow", "Adjust my EC to 2.5 mS/cm", "Run a full diagnosis"]
+    : ["What pH should I target?", "How often to renew the medium?", "Signs of contamination", "Optimal temperature range", "What is Zarrouk medium?"];
+
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0, background: C.bg }}>
+
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 13 }}>
-        {messages.length === 0 && !thinking && (
-          <div style={{ textAlign: "center", marginTop: 40, color: C.text3, fontSize: 12, fontFamily: C.mono }}>
-            Ask anything about your spirulina batch…
-          </div>
-        )}
-        {messages.map((m) => <Bubble key={m.id} msg={m} />)}
-        {thinking && (
-          <div className="msg-enter" style={{ display: "flex", gap: 9, alignItems: "center" }}>
-            <AgentAvatar />
-            <SpinnerDots />
-          </div>
-        )}
-        <div ref={bottomRef} />
+      <div style={{ flex: 1, overflowY: "auto", padding: "20px 0" }}>
+        <div style={{ maxWidth: 720, width: "100%", margin: "0 auto", padding: "0 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {messages.length === 0 && !thinking && (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 60, gap: 24 }}>
+              <div style={{
+                width: 48, height: 48, borderRadius: 14,
+                background: `linear-gradient(140deg, ${C.greenSoft}, ${C.green})`,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                boxShadow: C.glowMd, animation: "pulse-glow 3s ease-in-out infinite",
+              }}>
+                <svg viewBox="0 0 14 14" fill="none" width={24} height={24}>
+                  <path d="M7 .6C4.2.6 2.3 2.5 2.3 4.5c0 3 4.7 8.9 4.7 8.9s4.7-5.9 4.7-8.9C11.7 2.5 9.8.6 7 .6z" fill={C.green} />
+                  <circle cx="7" cy="4.5" r="1.9" fill={C.bg} />
+                </svg>
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 22, fontWeight: 600, color: C.text, marginBottom: 6 }}>
+                  How can I help?
+                </div>
+                <div style={{ fontSize: 12, color: C.text3, fontFamily: C.mono }}>
+                  {tier === "pro" ? "Agent · Sensors · M1 · M2 · M3" : "Knowledge mode"}
+                </div>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", maxWidth: 520 }}>
+                {prompts.map((p) => (
+                  <button key={p} onClick={() => setInput(p)} style={{
+                    padding: "8px 14px", borderRadius: 8,
+                    background: C.card, border: `1px solid ${C.border}`,
+                    color: C.text2, fontSize: 13, cursor: "pointer", transition: "all .15s",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.green; e.currentTarget.style.color = C.text; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.text2; }}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {messages.map((m) => <Bubble key={m.id} msg={m} />)}
+
+          {thinking && (
+            <div className="msg-enter" style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <AgentAvatar />
+              <SpinnerDots />
+            </div>
+          )}
+          <div ref={bottomRef} />
+        </div>
       </div>
 
-      {/* Input bar */}
-      <div style={{ padding: "11px 16px", borderTop: `1px solid ${C.border}`, background: C.surface, flexShrink: 0 }}>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, background: C.card, border: `1px solid ${C.border2}`, borderRadius: 10, padding: "9px 13px" }}>
-            <input
+      {/* Input */}
+      <div style={{ borderTop: `1px solid ${C.border}`, background: C.surface, flexShrink: 0, padding: "12px 20px 16px" }}>
+        <div style={{ maxWidth: 720, margin: "0 auto" }}>
+          <div style={{
+            display: "flex", gap: 10, alignItems: "flex-end",
+            background: C.card, border: `1px solid ${C.border2}`,
+            borderRadius: 12, padding: "10px 14px",
+            boxShadow: C.cardShadow, transition: "border-color .2s",
+          }}>
+            <textarea
+              ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
-              placeholder="Ask about your batch, sensors, harvest, nutrition…"
-              style={{ flex: 1, background: "transparent", border: "none", fontSize: 12, color: C.text, fontFamily: C.sans }}
+              onChange={(e) => {
+                setInput(e.target.value);
+                e.target.style.height = "auto";
+                e.target.style.height = Math.min(e.target.scrollHeight, 150) + "px";
+              }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              placeholder={`Ask about your ${tier === "pro" ? "batch, sensors, harvest…" : "spirulina cultivation…"}`}
+              rows={1}
+              style={{
+                flex: 1, background: "transparent", border: "none",
+                resize: "none", fontSize: 13.5, color: C.text,
+                fontFamily: C.sans, lineHeight: 1.55,
+                minHeight: 22, maxHeight: 150, overflowY: "auto",
+              }}
             />
-            {input && <span style={{ fontSize: 8.5, color: C.text3, fontFamily: C.mono, flexShrink: 0 }}>↵</span>}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, paddingBottom: 1 }}>
+              {input && (
+                <span style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>⏎ send · shift+⏎ newline</span>
+              )}
+              <button onClick={send} disabled={!input.trim() || thinking} style={{
+                width: 32, height: 32, borderRadius: 8, border: "none",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                transition: "all .15s", flexShrink: 0,
+                background:   input.trim() && !thinking ? C.green     : C.card2,
+                color:        input.trim() && !thinking ? C.bg        : C.text3,
+                opacity:      !input.trim() || thinking ? 0.5 : 1,
+              }}>
+                {thinking
+                  ? <div style={{ width: 12, height: 12, borderRadius: "50%", border: `2px solid ${C.text3}`, borderTopColor: C.green, animation: "spin .75s linear infinite" }} />
+                  : <svg width={14} height={14} viewBox="0 0 14 14" fill="none"><path d="M7 1L7 13M7 1L3 5M7 1L11 5" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round"/></svg>
+                }
+              </button>
+            </div>
           </div>
-          <button
-            onClick={send}
-            disabled={!input.trim() || thinking}
-            style={{
-              width: 36, height: 36, borderRadius: 9, border: "none", fontSize: 15,
-              display: "flex", alignItems: "center", justifyContent: "center", transition: "all .15s", flexShrink: 0,
-              background: input.trim() && !thinking ? C.greenSoft : C.card,
-              color:      input.trim() && !thinking ? C.green     : C.text3,
-              outline:    input.trim() && !thinking ? `1px solid #234830` : `1px solid ${C.border}`,
-            }}
-          >
-            {thinking
-              ? <div style={{ width: 13, height: 13, borderRadius: "50%", border: `2px solid ${C.text3}`, borderTopColor: C.green, animation: "spin .75s linear infinite" }} />
-              : "↑"
-            }
-          </button>
-        </div>
-        <div style={{ fontSize: 8.5, color: C.text3, textAlign: "center", marginTop: 6, fontFamily: C.mono }}>
-          {tier === "pro"
-            ? "M1 Anomaly · M2 Growth · M3 Harvest · RAG knowledge · Live sensors"
-            : "Knowledge-only · RAG · no sensor access"}
+          <div style={{ fontSize: 10, color: C.text3, textAlign: "center", marginTop: 7, fontFamily: C.mono }}>
+            {tier === "pro" ? "M1 Anomaly · M2 Growth · M3 Harvest · RAG · Live sensors" : "Knowledge mode — upgrade to Pro for sensor monitoring + ML"}
+          </div>
         </div>
       </div>
     </div>

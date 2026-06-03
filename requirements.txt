@@ -34,6 +34,9 @@ paho-mqtt>=2.0.0
 # Memory / caching
 redis>=5.0.0
 
+# Conversation persistence
+psycopg2-binary>=2.9.9
+
 # Proactive monitoring scheduler
 apscheduler>=3.10.0
 

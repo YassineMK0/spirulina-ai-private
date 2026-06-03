@@ -284,34 +284,217 @@ def read_sensors(state: AgentState) -> dict[str, Any]:
         return {"last_sensor_state": {}}
 
 
+_AGENTIC_SYSTEM = """\
+You are SpirulinaAI — a spirulina cultivation expert agent.
+Your job is to ACT, not just inform. When given a problem:
+
+STEP 1 — PLAN (always do this first, in the response before calling any tool)
+Write a short markdown plan:
+```
+## Plan
+1. <what you will check>
+2. <what you will calculate>
+3. <what you will recommend>
+```
+
+STEP 2 — ACT
+Call the relevant tools to gather exact figures. Available tools:
+- `calculate_ph_correction`   — dose of NaHCO3/acid to hit target pH
+- `calculate_ec_correction`   — nutrient addition or dilution to hit target EC
+- `diagnose_culture_symptom`  — structured checklist for visible symptoms
+- `format_action_plan`        — format final prioritised checklist
+
+STEP 3 — SYNTHESISE
+After all tool calls complete, write the final response:
+
+## Situation
+[1–2 sentences — what is happening and why it matters]
+
+## Analysis
+[What the sensor data, ML outputs, and tool results reveal]
+
+## Action Steps
+[Reference the tool output checklists here — do not invent doses]
+
+## Follow-up
+[What to monitor and when to re-check]
+
+RULES
+- Use tools when you need calculations — never guess chemical doses
+- Keep Action Steps to 3–5 items max
+- Bold critical values and actions
+- If anomaly score > 0.8 or status=error, say so clearly and recommend specialist contact
+- Respond in the same language the user asked in (FR or EN)
+"""
+
+# Max tool-call iterations before forcing final answer
+_MAX_ITERATIONS = 4
+
+
 def reasoning_agent(state: AgentState) -> dict[str, Any]:
-    """Reasoning stage — DeepSeek R1 for HARVEST and SYSTEM intents.
+    """Agentic stage — ReAct loop for HARVEST, SYSTEM, and UPDATE intents.
 
-    Called instead of generate_response when the intent requires step-by-step
-    analysis: harvest timing decisions, anomaly diagnosis, sensor interpretation.
-    Strips DeepSeek's <think> tags so only the final answer reaches the user.
+    Pipeline:
+    1. PLAN   — LLM outputs a markdown plan (visible to user)
+    2. ACT    — LLM calls domain tools (pH calc, EC calc, diagnosis …)
+    3. SYNTH  — LLM synthesises a rich markdown response with actionable steps
+
+    Falls back to single-shot generation on any LLM or tool error.
     """
-    print("[node] reasoning_agent  (DeepSeek R1)")
+    print("[node] reasoning_agent  (agentic ReAct)")
 
-    from rag.generator.generate import reasoning_generate
+    import os, re, json
+    from functools import lru_cache
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+    from agent.tools import get_agent_tools
+
+    # ── Build context block ─────────────────────────────────────────────────
     question      = _last_user_message(state)
     context       = state.get("rag_context", "")
     history       = state.get("chat_history", [])
     has_container = state.get("has_container", False)
+    sensor_state  = state.get("last_sensor_state") or {} if has_container else {}
+    ml_outputs    = state.get("ml_outputs")         or {} if has_container else {}
 
-    sensor_state = state.get("last_sensor_state") if has_container else None
-    ml_outputs   = state.get("ml_outputs")        if has_container else None
+    context_parts: list[str] = []
+    if context:
+        context_parts.append(f"<knowledge_base>\n{context}\n</knowledge_base>")
+    if sensor_state:
+        lines = "\n".join(f"  {k}: {v}" for k, v in sensor_state.items())
+        context_parts.append(f"<sensor_readings>\n{lines}\n</sensor_readings>")
+    if ml_outputs:
+        context_parts.append(f"<ml_outputs>\n{json.dumps(ml_outputs, indent=2)}\n</ml_outputs>")
 
-    answer = reasoning_generate(
-        question=question,
-        context=context,
-        history=history,
-        sensor_state=sensor_state,
-        ml_outputs=ml_outputs,
-    )
+    recent_hist = history[-8:] if len(history) > 8 else history
+    hist_lines = [
+        f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}"
+        for m in recent_hist[:-1]  # exclude current user message
+        if m.get("content")
+    ]
 
-    return {"response": answer}
+    human_content = ""
+    if context_parts:
+        human_content += "\n\n".join(context_parts) + "\n\n"
+    if hist_lines:
+        human_content += "<conversation_history>\n" + "\n".join(hist_lines) + "\n</conversation_history>\n\n"
+    human_content += f"Question: {question}"
+
+    # ── Initialise tool-bound LLM ───────────────────────────────────────────
+    tools = get_agent_tools()
+    tools_by_name = {t.name: t for t in tools}
+
+    provider = os.getenv("GENERATOR_MODEL_PROVIDER", "groq").lower()
+    try:
+        if provider == "groq":
+            from langchain_groq import ChatGroq
+            llm = ChatGroq(
+                model=os.getenv("GENERATOR_MODEL_NAME", "llama-3.3-70b-versatile"),
+                temperature=0.1,
+                max_tokens=2048,
+            ).bind_tools(tools)
+        else:
+            from langchain_openai import ChatOpenAI
+            kwargs = {
+                "model": os.getenv("REASONING_MODEL_NAME", "nvidia/nemotron-3-super-120b-a12b:free"),
+                "temperature": 0.1,
+                "max_tokens": 2048,
+            }
+            if provider == "openrouter":
+                kwargs["api_key"] = os.getenv("OPENROUTER_API_KEY", "")
+                kwargs["base_url"] = "https://openrouter.ai/api/v1"
+            llm = ChatOpenAI(**kwargs).bind_tools(tools)
+    except Exception as exc:
+        print(f"  [agent] LLM init failed: {exc} — falling back to single-shot")
+        from rag.generator.generate import reasoning_generate
+        answer = reasoning_generate(
+            question=question, context=context, history=history,
+            sensor_state=sensor_state or None, ml_outputs=ml_outputs or None,
+        )
+        return {"response": answer, "plan": "", "tool_calls": []}
+
+    # ── ReAct loop ──────────────────────────────────────────────────────────
+    messages: list = [
+        SystemMessage(content=_AGENTIC_SYSTEM),
+        HumanMessage(content=human_content),
+    ]
+    tool_calls_log: list[dict] = []
+    plan_text = ""
+
+    for iteration in range(_MAX_ITERATIONS):
+        print(f"  [agent] iteration {iteration + 1}/{_MAX_ITERATIONS}")
+        try:
+            response = llm.invoke(messages)
+        except Exception as exc:
+            print(f"  [agent] LLM error on iteration {iteration + 1}: {exc}")
+            break
+
+        messages.append(response)
+
+        # Capture the plan from the first AI message that has text
+        if not plan_text and isinstance(response, AIMessage) and response.content:
+            plan_text = response.content
+
+        # No tool calls → agent is done
+        if not getattr(response, "tool_calls", None):
+            print(f"  [agent] finished after {iteration + 1} iterations")
+            break
+
+        # Execute each tool call
+        for tc in response.tool_calls:
+            name    = tc.get("name", "")
+            args    = tc.get("args", {})
+            call_id = tc.get("id", f"call_{name}")
+
+            print(f"  [agent] tool: {name}({list(args.keys())})")
+            fn = tools_by_name.get(name)
+            if fn is None:
+                result_text = f"Error: unknown tool '{name}'"
+            else:
+                try:
+                    result_text = fn.invoke(args)
+                except Exception as exc:
+                    result_text = f"Tool error ({name}): {exc}"
+
+            tool_calls_log.append({"tool": name, "args": args, "result": str(result_text)[:600]})
+            messages.append(ToolMessage(content=str(result_text), tool_call_id=call_id))
+
+    # ── Extract final answer ────────────────────────────────────────────────
+    # Walk messages in reverse to find the last AI text (not a tool-call stub)
+    final_text = ""
+    for msg in reversed(messages):
+        if (
+            isinstance(msg, AIMessage)
+            and msg.content
+            and not getattr(msg, "tool_calls", None)
+        ):
+            final_text = msg.content
+            break
+
+    if not final_text:
+        # Last message has text but also has tool_calls (planning message) — use it
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage) and msg.content:
+                final_text = msg.content
+                break
+
+    if not final_text:
+        final_text = "I was unable to generate a response. Please try again."
+
+    # Strip chain-of-thought tags (R1-style models)
+    final_text = re.sub(r"<think>.*?</think>", "", final_text, flags=re.DOTALL).strip()
+
+    print(f"  [agent] tool_calls={len(tool_calls_log)}  response_len={len(final_text)}")
+
+    existing_tools = state.get("tools_used") or []
+    agentic_tool_labels = [f"tool:{tc['tool']}" for tc in tool_calls_log]
+
+    return {
+        "response":   final_text,
+        "plan":       plan_text,
+        "tool_calls": tool_calls_log,
+        "tools_used": existing_tools + agentic_tool_labels,
+    }
 
 
 def request_clarification(state: AgentState) -> dict[str, Any]:
