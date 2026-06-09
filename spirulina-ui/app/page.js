@@ -1,5 +1,5 @@
-import SpirulinaApp from "@/components/SpirulinaApp";
+import AppGate from "@/components/AppGate";
 
 export default function Home() {
-  return <SpirulinaApp />;
+  return <AppGate />;
 }

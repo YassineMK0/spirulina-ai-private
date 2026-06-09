@@ -24,7 +24,7 @@ import json
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -118,7 +118,13 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["POST", "GET", "DELETE", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+from api.auth  import router as auth_router
+from api.admin import router as admin_router
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 _graph = None
 
@@ -216,12 +222,32 @@ def rename_conversation(user_id: str, conv_id: str, body: TitleUpdate):
 # Chat
 # ---------------------------------------------------------------------------
 
+FREE_TIER_LIMIT = 3  # max messages for free-tier users
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     from data.conversations import conversation_store, make_title
+    from data.users import user_store
     from agent.monitor import register_session
 
     register_session(req.user_id, req.container_id)
+
+    # ── Resolve actual tier from DB (don't trust client-sent tier) ──────────
+    db_user    = user_store.get_by_id(req.user_id)
+    actual_tier = db_user["tier"] if db_user else req.tier
+
+    # ── Enforce free-tier message quota ─────────────────────────────────────
+    if actual_tier == "free":
+        used = user_store.count_messages(req.user_id)
+        if used >= FREE_TIER_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Free tier limit reached ({FREE_TIER_LIMIT} messages). "
+                    "Upgrade to Pro for unlimited access."
+                ),
+            )
 
     # ── Resolve / create conversation ───────────────────────────────────────
     conv_id = req.conversation_id.strip()
@@ -241,7 +267,7 @@ def chat(req: ChatRequest):
     result = _get_graph().invoke({
         "user_id":      req.user_id,
         "container_id": req.container_id,
-        "tier":         req.tier,
+        "tier":         actual_tier,
         "chat_history": history,
     })
 

@@ -42,3 +42,7 @@ apscheduler>=3.10.0
 
 # LLM providers
 langchain-groq>=0.2.0
+
+# Auth
+python-jose[cryptography]>=3.3.0
+bcrypt>=4.0.0

@@ -363,11 +363,57 @@ If readings have not improved, escalate to a cultivation specialist.
 """
 
 
+# ── Alert History ─────────────────────────────────────────────────────────────
+
+@tool
+def get_recent_alerts(container_id: str, limit: int = 10) -> str:
+    """Retrieve the actual logged alerts for a container from the database.
+
+    ALWAYS call this first when the user asks about alerts, warnings, anomalies,
+    or anything that has happened on the container. Never guess from sensor data —
+    read the real alert log.
+
+    Args:
+        container_id: Container to query (e.g. "container-01")
+        limit: Number of recent alerts to return (default 10)
+    """
+    try:
+        from data.alerts import alert_store
+        alerts = alert_store.get_recent(container_id, limit)
+    except Exception as exc:
+        return f"Could not retrieve alert history: {exc}"
+
+    if not alerts:
+        return (
+            f"**No alerts on record** for container `{container_id}`.\n\n"
+            "The container has been operating within normal thresholds since monitoring began."
+        )
+
+    severity_icon = {"critical": "🚨", "warning": "⚠️", "harvest": "🌾"}
+    lines = []
+    for a in alerts:
+        icon = severity_icon.get(a["severity"], "ℹ️")
+        try:
+            from datetime import datetime, timezone
+            dt     = datetime.fromisoformat(a["created_at"])
+            ts_str = dt.strftime("%Y-%m-%d %H:%M UTC")
+        except Exception:
+            ts_str = a["created_at"][:16] if a["created_at"] else "unknown time"
+
+        # First line of the message only (keep it readable)
+        first_line = a["message"].split("\n")[0].strip()[:140]
+        lines.append(f"{icon} **{a['severity'].upper()}** — {ts_str}\n   {first_line}")
+
+    header = f"## Alert History — `{container_id}` (last {len(alerts)})\n\n"
+    return header + "\n\n".join(lines)
+
+
 # ── Tool registry ─────────────────────────────────────────────────────────────
 
 def get_agent_tools() -> list:
     """Return all tools available to the agentic node."""
     return [
+        get_recent_alerts,
         calculate_ph_correction,
         calculate_ec_correction,
         diagnose_culture_symptom,

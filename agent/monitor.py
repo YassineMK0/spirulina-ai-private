@@ -257,6 +257,18 @@ def run_monitor_check(push_alert_fn) -> None:
 
             alert_text = generate_alert_text(container_id, sensor, breaches, ml_result)
             _last_alerts[user_id] = breach_key
+
+            # Persist to DB so the agent can query alert history
+            severity = max(
+                (b["severity"] for b in breaches),
+                key=lambda s: {"harvest": 0, "warning": 1, "critical": 2}[s],
+            )
+            try:
+                from data.alerts import alert_store
+                alert_store.save(user_id, container_id, alert_text, severity)
+            except Exception as _e:
+                print(f"[monitor] alert DB save failed: {_e}")
+
             push_alert_fn(user_id, alert_text)
 
         except Exception as exc:

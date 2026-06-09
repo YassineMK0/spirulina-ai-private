@@ -83,11 +83,15 @@ export default function AgentChat({
         plan:       res.plan       || "",
         time: t,
       }]);
-    } catch {
+    } catch (err) {
+      const isLimit = err?.status === 429;
+      const msg     = isLimit
+        ? "You have reached the **3-message limit** for free accounts.\n\nAsk your admin to upgrade your account to **Pro** for unlimited access."
+        : "Something went wrong. Please try again.";
       setMessages((m) => [...m, {
         id: idRef.current++, role: "agent",
-        text: "Something went wrong. Please try again.",
-        content: { type: "text", text: "Something went wrong. Please try again." },
+        text: msg,
+        content: { type: "text", text: msg },
         tools: [], tool_calls: [], plan: "", time: t,
       }]);
     } finally {
