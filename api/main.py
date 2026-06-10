@@ -44,6 +44,9 @@ def _push_alert(user_id: str, alert_text: str) -> None:
     q = _alert_queues.get(user_id)
     if q and _event_loop:
         _event_loop.call_soon_threadsafe(q.put_nowait, alert_text)
+        print(f"[alert] pushed to user={user_id[:8]}...")
+    else:
+        print(f"[alert] DROPPED — queue={q is not None} loop={_event_loop is not None} user={user_id[:8]}...")
 
 
 def _background_warmup():
@@ -55,7 +58,7 @@ def _background_warmup():
     except Exception as e:
         print(f"[warmup] retriever: {e}")
     for name, loader in [
-        ("M1 LSTM",           lambda: __import__("api.predict_lstm",          fromlist=["load_artifact"]).load_artifact()),
+        ("M1 IsolationForest", lambda: __import__("api.predict_isolationforest", fromlist=["load_artifact"]).load_artifact()),
         ("M2 LightGBM",       lambda: __import__("api.predict_lgbm",          fromlist=["load_artifact"]).load_artifact()),
         ("M3 harvest",        lambda: __import__("api.predict_lgbm_harvest",  fromlist=["load_artifacts"]).load_artifacts()),
     ]:
@@ -71,7 +74,7 @@ def _background_warmup():
 async def lifespan(app: FastAPI):
     import threading
     global _event_loop
-    _event_loop = asyncio.get_event_loop()
+    _event_loop = asyncio.get_running_loop()
 
     try:
         from agent.graph import graph as _g
@@ -94,7 +97,7 @@ async def lifespan(app: FastAPI):
         from apscheduler.schedulers.background import BackgroundScheduler
         from agent.monitor import run_monitor_check
         scheduler = BackgroundScheduler()
-        scheduler.add_job(lambda: run_monitor_check(_push_alert), "interval", seconds=15)
+        scheduler.add_job(lambda: run_monitor_check(_push_alert), "interval", seconds=15, max_instances=3)
         scheduler.start()
         print("[startup] monitor scheduler started")
     except Exception as e:
@@ -174,6 +177,21 @@ class TitleUpdate(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/status")
+def status():
+    """Diagnostic endpoint — shows active monitor sessions and SSE connections."""
+    from agent.monitor import get_active_sessions
+    from agent.sensors import get_sensor_reading, _cache
+    sessions = get_active_sessions()
+    return {
+        "active_sessions":    sessions,
+        "sse_connected_users": list(_alert_queues.keys()),
+        "event_loop_ready":   _event_loop is not None,
+        "cached_containers":  list(_cache.keys()),
+        "latest_sensors":     {cid: get_sensor_reading(cid) for cid in _cache},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +349,7 @@ def get_model_outputs(container_id: str):
     result = {"m1": {}, "m2": {}, "m3": {}, "readings": len(history)}
 
     try:
-        from api.predict_lstm import predict_df, load_artifact as load_m1
+        from api.predict_isolationforest import predict_df, load_artifact as load_m1
         out  = predict_df(df, load_m1())
         last = out.iloc[-1]
         score = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
@@ -394,3 +412,4 @@ async def alerts_sse(user_id: str, container_id: str = ""):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+

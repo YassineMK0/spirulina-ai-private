@@ -34,7 +34,7 @@ _RULES: list[tuple[str, str, float, str, str]] = [
     ("temperature", ">",  39.0,   "warning",  "overheating"),
     ("temperature", "<",  20.0,   "warning",  "too cold"),
     ("turbidity",   ">",  300.0,  "harvest",  "ready to harvest"),
-    ("EC",          ">",  3500.0, "warning",  "high salinity"),
+    ("EC",          ">",  30000.0, "warning",  "high salinity"),   # 30 mS/cm = 30000 µS/cm
     ("DO",          "<",  4.0,    "warning",  "low oxygen"),
 ]
 
@@ -85,11 +85,11 @@ def check_thresholds(sensor: dict) -> list[dict]:
 
 
 def _run_ml_prediction(container_id: str) -> dict:
-    """Run M1 LSTM anomaly model on the container history. Returns {} silently on failure."""
+    """Run M1 IsolationForest on the container history. Returns {} silently on failure."""
     try:
         import pandas as pd
         from agent.sensors import get_history
-        from api.predict_lstm import predict_df, load_artifact
+        from api.predict_isolationforest import predict_df, load_artifact
 
         history = get_history(container_id)
         if not history:
@@ -101,12 +101,16 @@ def _run_ml_prediction(container_id: str) -> dict:
         last     = result.iloc[-1]
 
         import numpy as np
-        score    = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
+        import json as _json
+        score = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
+        attr_raw = last.get("sensor_attribution", "{}")
+        attr = _json.loads(attr_raw) if isinstance(attr_raw, str) else (attr_raw or {})
         return {
-            "anomaly":  bool(last["is_anomaly"]),
-            "score":    round(score, 4),
-            "severity": str(last["severity"]),
-            "trend":    str(last["trend_direction"]),
+            "anomaly":            bool(last["is_anomaly"]),
+            "score":              round(score, 4),
+            "severity":           str(last["severity"]),
+            "trend":              str(last["trend_direction"]),
+            "sensor_attribution": attr,
         }
     except Exception as exc:
         print(f"[monitor] ML prediction failed: {exc}")
@@ -138,35 +142,58 @@ def generate_alert_text(
     )
     emoji = _SEVERITY_EMOJI[severity]
 
-    # Enrich with ML model result if available
+    # Upgrade severity if ML model says critical
+    if ml_result and ml_result.get("severity") == "critical" and severity != "critical":
+        severity = "critical"
+        emoji = _SEVERITY_EMOJI["critical"]
+
+    # Current sensor readings for context
+    _sensor_keys = ("pH", "EC", "DO", "temperature", "turbidity", "luminosity")
+    sensor_lines = "\n".join(
+        f"  {k}: {sensor[k]}" for k in _sensor_keys if k in sensor
+    )
+
+    # ML attribution block (which sensors drove the anomaly and by how much)
     ml_lines = ""
     if ml_result and ml_result.get("anomaly"):
-        ml_lines = (
-            f"\nML Anomaly Model (M1-LSTM):\n"
-            f"- Severity: {ml_result.get('severity', '?').upper()}\n"
-            f"- Score: {ml_result.get('score', 0):.3f}\n"
-            f"- Trend: {ml_result.get('trend', 'unknown')}\n"
+        attr = ml_result.get("sensor_attribution") or {}
+        top = list(attr.items())[:3]
+        attr_str = (
+            ", ".join(f"{k} ({round(v * 100)}%)" for k, v in top)
+            if top else "undetermined"
         )
-        if ml_result.get("severity") == "critical" and severity != "critical":
-            severity = "critical"
-            emoji = _SEVERITY_EMOJI["critical"]
+        ml_lines = (
+            f"\nM1 IsolationForest model:\n"
+            f"  severity={ml_result.get('severity','?').upper()}  "
+            f"score={ml_result.get('score', 0):.3f}  "
+            f"trend={ml_result.get('trend', 'stable')}\n"
+            f"  primary anomaly drivers: {attr_str}\n"
+        )
 
     # Try LLM-generated alert
     try:
         from rag.generator.generate import reasoning_generate
-        from agent.sensors import format_sensor_summary
         from rag.retriever.retrieve import retrieve, format_context
 
-        context = format_context(retrieve("sensor anomaly alert spirulina", top_k=3))
-        sensor_summary = format_sensor_summary(sensor)
+        context = format_context(retrieve("spirulina anomaly diagnosis corrective action", top_k=4))
 
         prompt = (
-            f"Container {container_id} has triggered an automatic alert.\n\n"
-            f"Breached thresholds:\n{breach_lines}\n"
+            f"=== AUTOMATIC ALERT — Container {container_id} ===\n\n"
+            f"Current sensor readings:\n{sensor_lines}\n\n"
+            f"Triggered threshold alerts:\n{breach_lines}\n"
             f"{ml_lines}\n"
-            f"Write a short alert message (3-4 sentences max) for the container owner. "
-            f"Tell them what is wrong, what to do right now, and what happens if they wait. "
-            f"Start with '{emoji} Alert:'"
+            f"You are an expert spirulina cultivation assistant (AlgaePool protocol, Dominique Delobel, June 2026).\n"
+            f"Answer in exactly 3 sentences:\n"
+            f"1. Name the specific problem using the exact sensor values "
+            f"(e.g. 'pH of 7.0 indicates Chlorella contamination or CO2 over-injection', "
+            f"'temperature of 42 C signals heater malfunction', "
+            f"'DO of 2.5 mg/L means oxygen depletion from bacterial bloom').\n"
+            f"2. State the one action the operator must take RIGHT NOW (be specific — "
+            f"e.g. 'add NaHCO3 to raise pH', 'shut off heater and add cold water', "
+            f"'increase aeration to emergency level').\n"
+            f"3. State what happens if untreated within 2 hours (be direct about culture loss).\n"
+            f"Start with '{emoji} {severity.upper()} — {container_id}:' then give sentence 1, 2, 3.\n"
+            f"Do NOT repeat the threshold table. Use the exact sensor values from above."
         )
 
         text = reasoning_generate(
@@ -178,12 +205,13 @@ def generate_alert_text(
         return text.strip()
 
     except Exception:
-        # Fallback: template-based alert
         labels = ", ".join(b["label"] for b in breaches)
+        vals = "  ".join(f"{k}={sensor.get(k,'?')}" for k in _sensor_keys if k in sensor)
         return (
-            f"{emoji} **Auto-alert — {container_id}**\n\n"
-            f"Threshold breached: **{labels}**\n\n"
-            f"Check your container now and take corrective action."
+            f"{emoji} **{severity.upper()} — {container_id}**\n\n"
+            f"**{labels}**\n\n"
+            f"{vals}\n\n"
+            f"Take immediate corrective action."
         )
 
 
@@ -216,25 +244,29 @@ def get_active_sessions() -> dict[str, str]:
 def run_monitor_check(push_alert_fn) -> None:
     """Check all active sessions and push alerts for any breaches.
 
-    Args:
-        push_alert_fn: async callable(user_id, alert_text) that sends the
-                       alert to the user's SSE stream.
+    The threshold + ML check runs synchronously (fast, < 1 s).
+    The Groq LLM call is offloaded to a daemon thread so the scheduler
+    job returns immediately and never blocks the next 15-second tick.
     """
+    import threading
     from agent.sensors import get_sensor_reading
+
+    if not _active_sessions:
+        print("[monitor] no active sessions — skipping check")
+        return
 
     for user_id, container_id in list(_active_sessions.items()):
         try:
             sensor    = get_sensor_reading(container_id)
+            print(f"[monitor] checking {container_id} for {user_id[:8]}...  pH={sensor.get('pH')} DO={sensor.get('DO')} temp={sensor.get('temperature')} EC={sensor.get('EC')}")
             breaches  = check_thresholds(sensor)
             ml_result = _run_ml_prediction(container_id)
 
-            # Trigger alert on threshold breach OR ML-detected anomaly
             ml_anomaly = ml_result.get("anomaly", False)
             if not breaches and not ml_anomaly:
-                _last_alerts.pop(user_id, None)   # reset dedup on clean check
+                _last_alerts.pop(user_id, None)
                 continue
 
-            # If ML fires but no threshold rule matched, create a synthetic breach entry
             if ml_anomaly and not breaches:
                 top_sensor = (
                     max(ml_result["sensor_attribution"], key=ml_result["sensor_attribution"].get)
@@ -250,26 +282,39 @@ def run_monitor_check(push_alert_fn) -> None:
                     "emoji":     _SEVERITY_EMOJI.get(ml_result.get("severity", "warning"), "⚠️"),
                 }]
 
-            # Dedup key = sorted breach labels (not LLM text — LLMs are non-deterministic)
             breach_key = ",".join(sorted(b["label"] for b in breaches))
             if _last_alerts.get(user_id) == breach_key:
                 continue
 
-            alert_text = generate_alert_text(container_id, sensor, breaches, ml_result)
+            # Mark dedup NOW so next tick doesn't re-fire while LLM is running
             _last_alerts[user_id] = breach_key
 
-            # Persist to DB so the agent can query alert history
             severity = max(
                 (b["severity"] for b in breaches),
                 key=lambda s: {"harvest": 0, "warning": 1, "critical": 2}[s],
             )
-            try:
-                from data.alerts import alert_store
-                alert_store.save(user_id, container_id, alert_text, severity)
-            except Exception as _e:
-                print(f"[monitor] alert DB save failed: {_e}")
 
-            push_alert_fn(user_id, alert_text)
+            # Offload the slow Groq call — scheduler job returns immediately
+            def _llm_and_push(uid, cid, s, br, ml, sev):
+                try:
+                    text = generate_alert_text(cid, s, br, ml)
+                    if not text:
+                        return
+                    try:
+                        from data.alerts import alert_store
+                        alert_store.save(uid, cid, text, sev)
+                    except Exception as _e:
+                        print(f"[monitor] alert DB save failed: {_e}")
+                    push_alert_fn(uid, text)
+                except Exception as exc:
+                    print(f"[monitor] alert generation failed: {exc}")
+
+            threading.Thread(
+                target=_llm_and_push,
+                args=(user_id, container_id, sensor, breaches, ml_result, severity),
+                daemon=True,
+                name=f"alert-{container_id[:8]}",
+            ).start()
 
         except Exception as exc:
             print(f"[monitor] error checking {container_id} for {user_id}: {exc}")
