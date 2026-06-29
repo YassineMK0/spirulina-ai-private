@@ -90,9 +90,9 @@ describe("ToolPills", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("prepends a checkmark to each tool", () => {
+  it("renders the tool name as-is, with no checkmark prefix", () => {
     render(<ToolPills tools={["sensor read"]} />);
-    expect(screen.getByText(/✓ sensor read/)).toBeInTheDocument();
+    expect(screen.getByText("sensor read")).toBeInTheDocument();
   });
 });
 

@@ -1,19 +1,6 @@
 "use client";
-import { useState, useEffect } from "react";
 import { C } from "@/lib/theme";
 import { Dot, Label } from "@/components/atoms";
-
-const useCountdown = (initSecs) => {
-  const [s, setS] = useState(initSecs);
-  useEffect(() => {
-    const id = setInterval(() => setS((x) => (x > 0 ? x - 1 : 0)), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const h   = Math.floor(s / 3600);
-  const m   = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  return `${h}h ${String(m).padStart(2, "0")}m ${String(sec).padStart(2, "0")}s`;
-};
 
 const Logo = () => (
   <div style={{ width: 30, height: 30, borderRadius: 8, background: `linear-gradient(140deg,#0F3A1E,${C.green})`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, animation: "glow 3s infinite" }}>
@@ -24,9 +11,7 @@ const Logo = () => (
   </div>
 );
 
-export default function Sidebar({ page, setPage, alertCount, mlStatus, harvestSecs }) {
-  const countdown = useCountdown(harvestSecs ?? 0);
-
+export default function Sidebar({ page, setPage, alertCount, mlStatus }) {
   const nav = [
     { k: "chat",      label: "Agent Chat",    icon: "◎", group: "WORKSPACE" },
     { k: "dashboard", label: "Dashboard",     icon: "▦", group: null        },
@@ -35,9 +20,7 @@ export default function Sidebar({ page, setPage, alertCount, mlStatus, harvestSe
   ];
 
   const models = [
-    { name: "M1 Anomaly",   color: mlStatus?.m1 === "alert" ? C.red   : mlStatus?.m1 === "ok" ? C.green : C.text3, status: mlStatus?.m1?.toUpperCase() || "—" },
-    { name: "M2 Turbidity", color: mlStatus?.m2 ? C.green : C.text3, status: mlStatus?.m2 ? "OK" : "—" },
-    { name: "M3 Harvest",   color: mlStatus?.m3 ? C.amber : C.text3, status: mlStatus?.m3 ? "OK" : "—" },
+    { name: "M1 Anomaly Detector", color: mlStatus?.m1 === "alert" ? C.red : mlStatus?.m1 === "ok" ? C.green : C.text3, status: mlStatus?.m1?.toUpperCase() || "—" },
   ];
 
   return (
@@ -103,20 +86,6 @@ export default function Sidebar({ page, setPage, alertCount, mlStatus, harvestSe
           </div>
         ))}
       </div>
-
-      {/* Harvest countdown */}
-      {harvestSecs > 0 && (
-        <div style={{ padding: "11px 12px", borderTop: `1px solid ${C.border}`, background: C.card }}>
-          <Label>HARVEST WINDOW</Label>
-          <div style={{ fontSize: 18, fontWeight: 800, color: C.green, lineHeight: 1, fontFamily: C.mono, letterSpacing: -0.5 }}>
-            {countdown}
-          </div>
-          <div style={{ fontSize: 8.5, color: C.text3, marginTop: 3, marginBottom: 7 }}>M3 forecast</div>
-          <div style={{ height: 3, background: C.border2, borderRadius: 99 }}>
-            <div style={{ width: "60%", height: "100%", background: `linear-gradient(90deg,#163A20,${C.green})`, borderRadius: 99 }} />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

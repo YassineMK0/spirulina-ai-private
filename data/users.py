@@ -69,6 +69,22 @@ class PostgresUserStore:
             self._release(conn)
         return uid
 
+    def create_user_with_id(self, uid: str, email: str, tier: str = "free") -> None:
+        """Create a Cognito-provisioned user using their Cognito sub as the local ID.
+        Password hash is empty — authentication is handled entirely by Cognito."""
+        conn = self._conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO users (id, email, password_hash, tier)
+                       VALUES (%s, %s, '', %s)
+                       ON CONFLICT (id) DO NOTHING""",
+                    (uid, email.lower().strip(), tier),
+                )
+            conn.commit()
+        finally:
+            self._release(conn)
+
     def get_by_email(self, email: str) -> dict | None:
         conn = self._conn()
         try:
@@ -167,7 +183,7 @@ class PostgresUserStore:
             self._release(conn)
 
     def count_messages(self, user_id: str) -> int:
-        """Total user-sent messages across all conversations (for free-tier limit)."""
+        """User-sent messages today (UTC) — resets at midnight for free-tier quota."""
         conn = self._conn()
         try:
             with conn.cursor() as cur:
@@ -176,6 +192,7 @@ class PostgresUserStore:
                     SELECT COUNT(m.id) FROM messages m
                     JOIN conversations c ON c.id = m.conversation_id
                     WHERE c.user_id = %s AND m.role = 'user'
+                      AND m.created_at >= CURRENT_DATE
                     """,
                     (user_id,),
                 )
@@ -206,6 +223,13 @@ class InMemoryUserStore:
             "password_hash": password_hash, "tier": tier, "created_at": self._now(),
         }
         return uid
+
+    def create_user_with_id(self, uid: str, email: str, tier: str = "free") -> None:
+        if uid not in self._users:
+            self._users[uid] = {
+                "id": uid, "email": email.lower().strip(),
+                "password_hash": "", "tier": tier, "created_at": self._now(),
+            }
 
     def get_by_email(self, email: str) -> dict | None:
         e = email.lower().strip()

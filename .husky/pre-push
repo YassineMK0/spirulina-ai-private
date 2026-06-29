@@ -1,0 +1,36 @@
+CACHE_FILE=".husky/_/pre-push-last-pass"
+TTL=600  # 10 minutes -- avoids re-running the full suite when pushing the
+         # same commit to a second push URL right after the first (e.g. a
+         # remote with multiple --push URLs, or a quick re-push).
+HEAD_SHA=$(git rev-parse HEAD)
+NOW=$(date +%s)
+
+if [ -f "$CACHE_FILE" ]; then
+  read CACHED_SHA CACHED_TIME < "$CACHE_FILE"
+  if [ "$CACHED_SHA" = "$HEAD_SHA" ]; then
+    AGE=$((NOW - CACHED_TIME))
+    if [ "$AGE" -lt "$TTL" ]; then
+      echo "[pre-push] commit $HEAD_SHA already passed ${AGE}s ago -- skipping re-run (cache TTL ${TTL}s)."
+      exit 0
+    fi
+  fi
+fi
+
+echo "[pre-push] running full backend test suite (pytest)..."
+.venv/Scripts/python.exe -m pytest tests/ \
+  --ignore=tests/test_conversations.py \
+  --ignore=tests/test_intent_router.py \
+  --ignore=tests/test_retrieval.py \
+  -q || {
+  echo "[pre-push] pytest FAILED -- fix failing backend tests before pushing."
+  exit 1
+}
+
+echo "[pre-push] running frontend test suite (jest)..."
+(cd spirulina-ui && npm test -- --silent) || {
+  echo "[pre-push] jest FAILED -- fix failing frontend tests before pushing."
+  exit 1
+}
+
+echo "$HEAD_SHA $NOW" > "$CACHE_FILE"
+echo "[pre-push] all checks passed"

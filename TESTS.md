@@ -21,64 +21,37 @@ npm run test:coverage # with coverage report
 
 ## Backend Tests (`tests/`)
 
-### `test_ml_models.py` — ML Prediction Pipeline Unit Tests
+> `test_ml_models.py` (M1 LSTM / M2 LightGBM / M3 harvest scheduler unit tests)
+> was removed along with the old `models/` artifacts it tested. The anomaly
+> detector is now `models/anomaly_model/` (rule engine + seasonal check +
+> LOF combination model) — see `test_anomaly_model.py` and
+> `test_monitor_combination.py` below.
 
-Tests all three machine learning models without loading real artifacts — models and scalers are mocked so tests run fast with no GPU required.
+### `test_anomaly_model.py` — M1 Anomaly Detector Unit Tests
 
-**M1 — LSTM Anomaly Detector helpers**
+Tests `models/anomaly_model/` (rules, seasonal, detector) against the real
+trained artifact (fast — no mocking needed, joblib load is <1s).
+
 | Test | What it tests |
 |------|--------------|
-| `test_severity_critical` | Score ≥ 0.80 returns `"critical"` |
-| `test_severity_medium` | Score between 0.55–0.79 returns `"medium"` |
-| `test_severity_low` | Score < 0.55 returns `"low"` |
-| `test_norm_score_clamps_to_01` | Normalized score is always clamped between 0 and 1 |
-| `test_norm_score_zero_range` | No division-by-zero when score_min == score_max |
-| `test_trend_direction_declining` | Rising scores → `"declining"` trend |
-| `test_trend_direction_recovering` | Falling scores → `"recovering"` trend |
-| `test_trend_direction_stable` | Flat scores → `"stable"` trend |
-| `test_trend_direction_single_value` | Single score (can't compute delta) → `"stable"` |
-| `test_trend_direction_all_nan` | All NaN values → `"stable"` (no crash) |
-| `test_sensor_attribution_sums_correctly` | Equal error across sensors → equal attribution values |
-| `test_sensor_attribution_returns_all_columns` | Output dict has all 6 sensor keys |
+| `TestEvaluateRulesTurbidite::*` | `evaluate_rules` tolerates a missing/`None` `Turbidite` key instead of `KeyError` (the live agent snapshot never has a calibrated OD680 value) |
+| `TestSeasonalResidualZscore::*` | Robust z-score against hour-of-day median/MAD baseline; zero-MAD doesn't divide by zero |
+| `TestAnomalyDetectorLoad::*` | `AnomalyDetector.load()` works; combination model's `feature_cols` excludes `Turbidite`; `evaluate()` skips the combination layer when `daily_context` is `None` or incomplete; pH crash → severity 3; clean snapshot → severity 0 |
 
-**M1 — `predict_df` output validation**
+---
+
+### `test_monitor_combination.py` — 24h Combination-Model Cron Wiring
+
+Integration tests against the real sqlite-backed `sensor_store` (throwaway
+container IDs, cleaned up per test) for the pieces added when the LOF
+combination model was wired into a daily cron job (`agent/monitor.py`,
+`data/store.py`).
+
 | Test | What it tests |
 |------|--------------|
-| `test_output_columns_present` | Result DataFrame contains all expected columns |
-| `test_output_length_equals_input_length` | Output has same row count as input |
-| `test_is_anomaly_is_boolean` | `is_anomaly` column is boolean type |
-| `test_severity_values_are_valid` | `severity` only contains `"critical"`, `"medium"`, or `"low"` |
-| `test_sensor_attribution_is_valid_json` | Each `sensor_attribution` cell parses as valid JSON |
-| `test_raises_on_missing_columns` | `ValueError` raised when sensor columns are absent |
-| `test_raises_on_unparseable_date` | `ValueError` raised when date column has invalid values |
-| `test_scores_nan_for_rows_before_window` | Rows before window_size get `NaN` anomaly score (not a crash) |
-
-**M2 — LightGBM Turbidity Forecaster**
-| Test | What it tests |
-|------|--------------|
-| `test_output_keys_present` | Result dict has `low`, `prediction`, `high`, `date` |
-| `test_prediction_within_low_high_range` | `low ≤ prediction ≤ high` is always satisfied |
-| `test_raises_when_features_empty` | `ValueError` raised when `build_features` returns empty DataFrame |
-
-**M3 — Harvest Scheduler helpers**
-| Test | What it tests |
-|------|--------------|
-| `test_reason_not_ready` | `"not_ready"` label produces a "not ready" message |
-| `test_reason_heavy` | `"heavy"` label includes harvest percentage and "optimal" |
-| `test_reason_moderate` | `"moderate"` label includes harvest percentage |
-| `test_reason_light` | `"light"` label includes harvest percentage |
-| `test_recommendation_all_not_ready` | All days not_ready → recommendation says "not ready" |
-| `test_recommendation_best_is_today` | Best day is today → recommendation references today |
-| `test_recommendation_best_is_tomorrow` | Best day is tomorrow → recommendation says "tomorrow" |
-| `test_recommendation_best_is_day_after` | Best day is day+2 → recommendation says "2 days" |
-
-**M3 — `schedule` and `_score_row`**
-| Test | What it tests |
-|------|--------------|
-| `test_raises_when_too_few_rows` | `ValueError` raised when fewer than 6 rows provided |
-| `test_schedule_output_keys` | Result dict has `today`, `tomorrow`, `day_after`, `recommendation` |
-| `test_score_row_returns_expected_keys` | Row scoring returns `label`, `harvest_pct`, `confidence` |
-| `test_score_row_returns_not_ready_on_nan_features` | NaN feature values → `not_ready` with 0% harvest (no crash) |
+| `TestGetSince::*` | `SensorStore.get_since` filters by timestamp, returns oldest-first, and (unlike `get_latest`) doesn't drop rows with partial sensor data |
+| `TestBuildDailyContext::*` | `_build_daily_context` returns `None` with <2 readings; builds the exact 12-key feature vector with enough 24h history; normalizes EC from µS/cm to mS/cm |
+| `TestRunCombinationModelCheck::*` | No-op with no active sessions or insufficient history; pushes a `severity=warning, source=model-24h` alert when the LOF layer flags an outlier day; repeat calls with the same score are deduped |
 
 ---
 
@@ -255,7 +228,7 @@ Tests the 6 primitive components in `components/atoms.jsx` in isolation.
 | `renders tool names` | Each tool name appears in the DOM |
 | `returns null when tools is empty` | Nothing is rendered for an empty array |
 | `returns null when tools is undefined` | Nothing is rendered when prop is missing |
-| `prepends a checkmark to each tool` | Each pill displays `"✓ <tool name>"` |
+| `renders the tool name as-is, with no checkmark prefix` | Each pill displays the tool name unmodified (no `"✓ "` prefix) |
 
 **`SpinnerDots`**
 | Test | What it tests |

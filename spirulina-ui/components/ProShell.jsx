@@ -33,8 +33,13 @@ export default function ProShell({ userId, containerId }) {
   // SSE alert stream — runs once per session at the ProShell level
   useEffect(() => {
     const disconnect = connectAlerts(userId, containerId, {
-      onAlert: (text) => {
-        const entry = { text, time: now(), severity: "medium" };
+      onAlert: (text, meta) => {
+        const entry = {
+          text, time: now(),
+          severity: meta?.severity || "medium",
+          affected: meta?.affected || [],
+          source:   meta?.source   || "model",
+        };
         setAlerts((prev) => [...prev, entry]);
         setChatAlerts((prev) => [...prev, entry]);  // mirrors into chat
       },
@@ -58,7 +63,6 @@ export default function ProShell({ userId, containerId }) {
         setPage={setPage}
         alertCount={activeAlerts.length}
         mlStatus={mlStatus}
-        harvestSecs={0}
       />
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>

@@ -1,11 +1,22 @@
-"""Authentication — signup, login, token helpers."""
+"""Authentication — signup, login, token helpers.
+
+Supports two token types transparently:
+  - Custom HS256 JWT  (issued by /auth/login or /auth/signup)
+  - Cognito RS256 JWT (issued by AWS Cognito — verified via JWKS)
+
+require_auth() accepts both.  Cognito users are auto-provisioned in the
+local DB on first request so tier management works the same for all users.
+"""
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
+
+log = logging.getLogger("spirulina.auth")
 
 JWT_SECRET    = os.getenv("JWT_SECRET", "spirulina-secret-key-change-in-production")
 JWT_ALGORITHM = "HS256"
@@ -42,11 +53,35 @@ def create_token(user: dict) -> str:
 
 
 def decode_token(token: str) -> dict:
+    from api.cognito import is_cognito_token, verify_cognito_token
+
+    # Cognito token (RS256) — verify against JWKS and auto-provision user
+    if is_cognito_token(token):
+        payload = verify_cognito_token(token)
+        _provision_cognito_user(payload)
+        return payload
+
+    # Custom HS256 JWT issued by this backend
     from jose import jwt, JWTError
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError as exc:
         raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+
+
+def _provision_cognito_user(payload: dict) -> None:
+    """Insert Cognito user into local DB on first login (idempotent)."""
+    try:
+        from data.users import user_store
+        if not user_store.get_by_id(payload["sub"]):
+            user_store.create_user_with_id(
+                uid=payload["sub"],
+                email=payload["email"],
+                tier=payload.get("tier", "free"),
+            )
+            log.info("provisioned Cognito user  sub=%s  email=%s", payload["sub"][:8], payload["email"])
+    except Exception as exc:
+        log.warning("could not provision Cognito user: %s", exc)
 
 
 # ── FastAPI dependencies ─────────────────────────────────────────────────────

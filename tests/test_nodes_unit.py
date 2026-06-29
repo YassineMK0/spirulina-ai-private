@@ -268,10 +268,21 @@ class TestFormatMlBlock:
     def test_empty_returns_empty(self):
         assert self._fmt({}) == ""
 
-    def test_contains_xml_tags(self):
-        out = self._fmt({"growth_score": 0.8})
+    def test_unknown_keys_return_empty(self):
+        assert self._fmt({"growth_score": 0.8}) == ""
+
+    def test_anomaly_true_contains_xml_tags_and_findings(self):
+        ml = {"anomaly": True, "severity": "critical",
+              "rule_findings": [{"parameter": "pH", "severity": 3, "label": "pH crash", "detail": "pH=7.00"}]}
+        out = self._fmt(ml)
         assert "<ml_predictions>" in out
         assert "</ml_predictions>" in out
+        assert "CRITICAL" in out
+        assert "pH crash" in out
+
+    def test_no_anomaly_still_shown_when_rule_findings_key_present(self):
+        out = self._fmt({"anomaly": False, "rule_findings": [], "seasonal": {}})
+        assert "anomaly:   NO" in out
 
 
 class TestStripThinkTags:
@@ -359,11 +370,12 @@ class TestTemplateRagAnswer:
     def test_answer_returned_as_is_when_no_context(self):
         assert self._answer("hello") == "hello"
 
-    def test_sources_appended_when_present(self):
+    def test_context_present_does_not_alter_answer(self):
+        # template_rag_answer no longer appends a source footnote -- it
+        # returns the LLM answer unchanged regardless of rag_context.
         ctx = "[Source 1: manual.pdf, p.1] Some text here"
         out = self._answer("My answer.", ctx)
-        assert "manual.pdf" in out
-        assert "Sources" in out
+        assert out == "My answer."
 
 
 class TestTemplateAlert:
@@ -392,59 +404,6 @@ class TestTemplateAlert:
     def test_container_id_included(self):
         out = self._alert("INFO", "msg", "act", container_id="CTR-42")
         assert "CTR-42" in out
-
-
-class TestTemplatePrediction:
-    """template_prediction: 60-minute forecast table."""
-
-    def _pred(self, ml_outputs, sensor=None):
-        from agent.formatter import template_prediction
-        return template_prediction(ml_outputs, sensor)
-
-    def test_no_prediction_key_returns_empty(self):
-        assert self._pred({}) == ""
-
-    def test_scalar_prediction_shown(self):
-        out = self._pred({"growth_prediction": 0.82})
-        assert "0.82" in out
-
-    def test_nested_prediction_dict(self):
-        ml = {"growth_prediction": {"OD680": {"current": 0.8, "in_60min": 0.9, "trend": "rising"}}}
-        out = self._pred(ml)
-        assert "OD680" in out
-        assert "0.8" in out
-        assert "0.9" in out
-
-
-class TestTemplateHarvestCard:
-    """template_harvest_card: three-scenario harvest timing card."""
-
-    def _harvest(self, ml_outputs, sensor=None):
-        from agent.formatter import template_harvest_card
-        return template_harvest_card(ml_outputs, sensor or {})
-
-    def test_no_harvest_key_returns_empty(self):
-        assert self._harvest({}) == ""
-
-    def test_scalar_harvest_decision_shown(self):
-        out = self._harvest({"harvest_readiness": "harvest in 2 days"})
-        assert "harvest in 2 days" in out
-
-    def test_structured_harvest_scenarios(self):
-        ml = {
-            "harvest_readiness": {
-                "early":    {"timing": "Now",       "yield": "180g"},
-                "balanced": {"timing": "Tomorrow",  "yield": "420g"},
-                "optimal":  {"timing": "+2 days",   "yield": "520g"},
-            }
-        }
-        out = self._harvest(ml)
-        assert "Early" in out
-        assert "Optimal" in out
-
-    def test_od_from_sensor_shown(self):
-        out = self._harvest({"harvest_readiness": "ready"}, sensor={"od680": 1.1})
-        assert "1.1" in out
 
 
 class TestFormatMessage:
@@ -488,16 +447,22 @@ class TestFormatMessage:
                         sensor={"ph": 6.0}, container_id="CTR-001")
         assert "🚨" in out or "CRITICAL" in out
 
-    def test_harvest_card_shown_for_harvest_intent(self):
-        ml = {"harvest_readiness": "harvest in 2 days"}
+    def test_harvest_intent_is_plain_text_no_ml_card(self):
+        # HARVEST intent no longer renders an ML schedule card -- just the
+        # LLM answer, same as KNOWLEDGE (M2/M3 were removed).
         out = self._fmt(intent="HARVEST", has_container=True,
-                        ml_outputs=ml, container_id="CTR-001")
-        assert "Harvest Window" in out
+                        raw_answer="Wait 2 more days before harvesting.",
+                        container_id="CTR-001")
+        assert "Wait 2 more days before harvesting." in out
+        assert "Harvest Window" not in out
 
-    def test_prediction_card_shown_when_growth_prediction_present(self):
-        ml = {"growth_prediction": 0.9}
-        out = self._fmt(has_container=True, ml_outputs=ml)
-        assert "Forecast" in out
+    def test_anomaly_true_shows_alert_and_sensor_card(self):
+        ml = {"anomaly": True, "severity": "critical",
+              "rule_findings": [{"parameter": "pH", "severity": 3, "label": "pH crash", "detail": "pH=7.00"}]}
+        out = self._fmt(intent="KNOWLEDGE", has_container=True,
+                        sensor={"pH": 7.0}, ml_outputs=ml, container_id="CTR-001")
+        assert "Anomaly detected" in out
+        assert "Sensor Status" in out
 
     def test_off_domain_no_extra_cards(self):
         out = self._fmt(intent="OFF_DOMAIN", raw_answer="I can't help with that.")
@@ -674,24 +639,24 @@ class TestCheckThresholds:
 
     def test_clean_readings_return_no_breaches(self):
         sensor = {
-            "ph": 9.5,
-            "temperature_c": 35,
-            "od680": 0.8,
-            "conductivity_ms": 25,
-            "dissolved_o2_pct": 80,
+            "pH": 9.5,
+            "temperature": 35,
+            "turbidity": 200,
+            "EC": 20000,
+            "DO": 7.0,
         }
         assert self._check(sensor) == []
 
     def test_ph_crash_returns_critical(self):
-        breaches = self._check({"ph": 7.0})
+        breaches = self._check({"pH": 7.0})
         assert any(b["severity"] == "critical" for b in breaches)
 
     def test_high_ph_returns_warning(self):
-        breaches = self._check({"ph": 11.0})
+        breaches = self._check({"pH": 11.0})
         assert any(b["severity"] == "warning" for b in breaches)
 
-    def test_high_od_returns_harvest(self):
-        breaches = self._check({"od680": 1.2})
+    def test_high_turbidity_returns_harvest(self):
+        breaches = self._check({"turbidity": 320.0})
         assert any(b["severity"] == "harvest" for b in breaches)
 
     def test_status_error_returns_critical(self):
@@ -700,11 +665,11 @@ class TestCheckThresholds:
 
     def test_missing_key_ignored(self):
         # No crash for partial sensor readings
-        breaches = self._check({"ph": 9.5})
+        breaches = self._check({"pH": 9.5})
         assert breaches == []
 
     def test_multiple_breaches_returned(self):
-        sensor = {"ph": 7.0, "temperature_c": 42, "od680": 1.5}
+        sensor = {"pH": 7.0, "temperature": 42, "turbidity": 320.0}
         breaches = self._check(sensor)
         assert len(breaches) >= 2
 

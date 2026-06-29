@@ -23,3 +23,6 @@ data/processed/rag_eval_results.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Node (root-level tooling only -- husky; spirulina-ui has its own .gitignore)
+node_modules/

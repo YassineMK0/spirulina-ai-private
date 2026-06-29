@@ -1,4 +1,7 @@
-import { sendMessage, getHistory, clearHistory, getModelOutputs, getSensorData, connectAlerts } from "@/lib/api";
+import {
+  sendMessage, listConversations, getConversationMessages, deleteConversation,
+  getModelOutputs, getSensorData, connectAlerts,
+} from "@/lib/api";
 
 beforeEach(() => {
   global.fetch = jest.fn();
@@ -24,7 +27,9 @@ describe("sendMessage", () => {
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: "hello", user_id: "u1", container_id: "c1", tier: "pro" }),
+        body: JSON.stringify({
+          message: "hello", user_id: "u1", container_id: "c1", tier: "pro", conversation_id: "",
+        }),
       })
     );
     expect(result.response).toBe("hello");
@@ -38,42 +43,60 @@ describe("sendMessage", () => {
   });
 });
 
-// ── getHistory ────────────────────────────────────────────────────────────────
+// ── listConversations ──────────────────────────────────────────────────────────
 
-describe("getHistory", () => {
+describe("listConversations", () => {
   it("returns parsed array on success", async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => [{ id: "c1", title: "pH question" }],
+    });
+
+    const conversations = await listConversations("user1");
+    expect(conversations).toEqual([{ id: "c1", title: "pH question" }]);
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/conversations/user1"), expect.anything());
+  });
+
+  it("returns [] when response is not ok", async () => {
+    global.fetch.mockResolvedValue({ ok: false });
+    expect(await listConversations("user1")).toEqual([]);
+  });
+
+  it("returns [] on network error", async () => {
+    global.fetch.mockRejectedValue(new Error("network error"));
+    expect(await listConversations("user1")).toEqual([]);
+  });
+});
+
+// ── getConversationMessages ────────────────────────────────────────────────────
+
+describe("getConversationMessages", () => {
+  it("returns parsed messages on success", async () => {
     global.fetch.mockResolvedValue({
       ok: true,
       json: async () => [{ role: "user", content: "hi" }],
     });
 
-    const history = await getHistory("user1");
-    expect(history).toEqual([{ role: "user", content: "hi" }]);
-    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/history/user1"));
+    const messages = await getConversationMessages("user1", "conv1");
+    expect(messages).toEqual([{ role: "user", content: "hi" }]);
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/conversations/user1/conv1"), expect.anything());
   });
 
   it("returns [] when response is not ok", async () => {
     global.fetch.mockResolvedValue({ ok: false });
-    const history = await getHistory("user1");
-    expect(history).toEqual([]);
-  });
-
-  it("returns [] on network error", async () => {
-    global.fetch.mockRejectedValue(new Error("network error"));
-    const history = await getHistory("user1");
-    expect(history).toEqual([]);
+    expect(await getConversationMessages("user1", "conv1")).toEqual([]);
   });
 });
 
-// ── clearHistory ──────────────────────────────────────────────────────────────
+// ── deleteConversation ─────────────────────────────────────────────────────────
 
-describe("clearHistory", () => {
-  it("sends DELETE to /history/{userId}", async () => {
+describe("deleteConversation", () => {
+  it("sends DELETE to /conversations/{userId}/{convId}", async () => {
     global.fetch.mockResolvedValue({ ok: true });
-    await clearHistory("user1");
+    await deleteConversation("user1", "conv1");
     expect(fetch).toHaveBeenCalledWith(
-      expect.stringContaining("/history/user1"),
-      { method: "DELETE" }
+      expect.stringContaining("/conversations/user1/conv1"),
+      expect.objectContaining({ method: "DELETE" })
     );
   });
 });
@@ -82,7 +105,7 @@ describe("clearHistory", () => {
 
 describe("getModelOutputs", () => {
   it("returns parsed data on success", async () => {
-    const mockData = { m1: { anomaly: false }, m2: { prediction: 120 }, m3: { harvest_pct: 20 } };
+    const mockData = { m1: { anomaly: false, severity: null, rule_findings: [], seasonal: {} } };
     global.fetch.mockResolvedValue({ ok: true, json: async () => mockData });
 
     const result = await getModelOutputs("container-01");
@@ -150,11 +173,13 @@ describe("connectAlerts", () => {
     expect(onConnect).toHaveBeenCalled();
   });
 
-  it("calls onAlert with text when type=alert is received", () => {
+  it("calls onAlert with text and meta when type=alert is received", () => {
     const onAlert = jest.fn();
     connectAlerts("user1", "", { onAlert });
-    mockEventSource.onmessage({ data: JSON.stringify({ type: "alert", text: "pH dropped!" }) });
-    expect(onAlert).toHaveBeenCalledWith("pH dropped!");
+    mockEventSource.onmessage({
+      data: JSON.stringify({ type: "alert", text: "pH dropped!", severity: "critical", affected: ["pH"], source: "model" }),
+    });
+    expect(onAlert).toHaveBeenCalledWith("pH dropped!", { severity: "critical", affected: ["pH"], source: "model" });
   });
 
   it("calls onError when EventSource errors", () => {

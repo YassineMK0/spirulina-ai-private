@@ -2,6 +2,12 @@
 import { C } from "@/lib/theme";
 import { Tag } from "@/components/atoms";
 
+const SOURCE_LABEL = {
+  rule:        "Threshold Rule",
+  model:       "M1 Model",
+  "rule+model": "Rule + Model",
+};
+
 export default function AlertsPage({ alerts = [], onGoChat }) {
   const palette = {
     critical: { bg: C.redSoft,   bd: "#4A1010", col: C.red   },
@@ -29,9 +35,11 @@ export default function AlertsPage({ alerts = [], onGoChat }) {
                 <div style={{ width: 8, height: 8, borderRadius: "50%", background: p.col, flexShrink: 0, marginTop: 3, animation: i === 0 ? "blink 1.2s infinite" : undefined }} />
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 700, color: p.col, marginBottom: 2 }}>
-                    M1 Anomaly · {a.severity?.toUpperCase()}
+                    {SOURCE_LABEL[a.source] || SOURCE_LABEL.model} · {a.severity?.toUpperCase()}
                   </div>
-                  <div style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>Score {a.score?.toFixed(3)} · Trend: {a.trend}</div>
+                  {a.affected?.length > 0 && (
+                    <div style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>Affected: {a.affected.join(", ")}</div>
+                  )}
                 </div>
               </div>
               <Tag color={i === 0 ? C.red : C.green}>{i === 0 ? "ACTIVE" : "PAST"}</Tag>

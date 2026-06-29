@@ -162,109 +162,31 @@ def retrieve_rag(state: AgentState) -> dict[str, Any]:
 
 
 def run_ml_models(state: AgentState) -> dict[str, Any]:
-    """Stage 4 — run M1/M2/M3 on the latest sensor data.
+    """Stage 4 — run the M1 anomaly detector (rule engine + seasonal check)
+    on the latest sensor data.
 
-    Data sources (in priority order):
-      1. last_sensor_state  — live MQTT reading (populated by read_sensors)
-      2. DB latest row      — last persisted reading (covers server restarts)
+    This is the only ML model in the pipeline right now (rules + Local
+    Outlier Factor combination model, models/anomaly_model). The combination
+    model layer needs 24h of rolling history and is scored separately by its
+    own cron job (agent.monitor.run_combination_model_check) -- not here.
 
-    If neither source has data, returns empty outputs immediately.
+    Reuses agent.monitor._run_ml_prediction so the chat path and the
+    proactive-alert path stay on one implementation.
     """
     print("[node] run_ml_models")
     container_id = state.get("container_id") or ""
     if not container_id:
         return {"ml_outputs": {}, "tools_used": []}
 
-    import pandas as pd
-    from agent.sensors import get_history
-    from data.store import sensor_store
+    from agent.monitor import _run_ml_prediction
 
-    # ── Resolve latest reading ────────────────────────────────────────────────
-    reading = state.get("last_sensor_state") or {}
-    if not reading:
-        rows = sensor_store.get_latest(container_id, n=1)
-        if rows:
-            reading = rows[-1]
-            print(f"  [ml] MQTT cache empty — using latest DB row ({reading.get('date','?')})")
-
-    if not reading:
+    ml = _run_ml_prediction(container_id)
+    if not ml:
         print("  [ml] no sensor data available — skipping ML")
         return {"ml_outputs": {}, "tools_used": []}
 
-    ml: dict[str, Any] = {}
-    tools: list[str]   = ["sensor.read()"]
-
-    # ── M1: LSTM anomaly detection ────────────────────────────────────────────
-    try:
-        from api.predict_lstm import predict_df, load_artifact
-
-        history = get_history(container_id)
-        if history:
-            artifact = load_artifact()
-            result   = predict_df(pd.DataFrame(history), artifact)
-            last     = result.iloc[-1]
-            score    = float(last["anomaly_score"]) if not pd.isna(last["anomaly_score"]) else 0.0
-            anomaly  = bool(last["is_anomaly"])
-            severity = str(last["severity"])
-            trend    = str(last["trend_direction"])
-
-            ml.update({
-                "anomaly":        anomaly,
-                "anomaly_flag":   anomaly,
-                "score":          round(score, 4),
-                "severity":       severity,
-                "trend":          trend,
-                "anomaly_detail": (
-                    f"Severity: **{severity}**  |  Score: {score:.3f}  |  Trend: {trend}"
-                    if anomaly else f"Score: {score:.3f} (normal)"
-                ),
-            })
-            tools.append("M1 Anomaly Detector")
-            print(f"  [m1] anomaly={anomaly}  severity={severity}  score={score:.3f}")
-    except Exception as exc:
-        print(f"  [warn] M1 failed: {exc}")
-
-    # ── M2: next-day turbidity forecast ──────────────────────────────────────
-    try:
-        from api.predict_lgbm import predict, load_artifact as load_m2
-
-        history = get_history(container_id)
-        if len(history) >= 5:
-            forecast = predict(pd.DataFrame(history), load_m2())
-            ml["turbidity_forecast"] = forecast
-            tools.append("M2 Growth Predictor")
-            print(f"  [m2] p50={forecast.get('prediction')}")
-    except Exception as exc:
-        print(f"  [warn] M2 failed: {exc}")
-
-    # ── M3: harvest readiness scheduler ──────────────────────────────────────
-    try:
-        from api.predict_lgbm_harvest import schedule, load_artifacts as load_m3
-
-        history   = get_history(container_id)
-        n_readings = len(history)
-        min_rows  = 6
-
-        if n_readings >= min_rows:
-            m3_art, m2_art = load_m3()
-            harvest = schedule(pd.DataFrame(history), m3_art, m2_art)
-            ml["harvest"] = harvest
-            tools.append("M3 Harvest Planner")
-            print(f"  [m3] recommendation={harvest.get('recommendation')}")
-        else:
-            # Not enough history — tell the reasoning agent explicitly
-            ml["harvest"] = {
-                "cold_start":     True,
-                "readings_have":  n_readings,
-                "readings_need":  min_rows,
-                "recommendation": f"Not enough data yet ({n_readings}/{min_rows} readings). "
-                                  f"Need {min_rows - n_readings} more sensor readings before M3 can predict harvest timing.",
-            }
-            print(f"  [m3] cold start — only {n_readings}/{min_rows} readings")
-    except Exception as exc:
-        print(f"  [warn] M3 failed: {exc}")
-
-    return {"ml_outputs": ml, "tools_used": tools}
+    print(f"  [m1] anomaly={ml.get('anomaly')}  severity={ml.get('severity')}")
+    return {"ml_outputs": ml, "tools_used": ["sensor.read()", "M1 Anomaly Detector"]}
 
 
 def read_sensors(state: AgentState) -> dict[str, Any]:
@@ -618,18 +540,17 @@ def generate_response(state: AgentState) -> dict[str, Any]:
 def _build_content(state: AgentState) -> dict:
     """Build the structured content object consumed by the Next.js frontend.
 
-    Maps intent + ml_outputs to one of four content types:
+    Maps ml_outputs to one of two content types:
       diagnosis — M1 anomaly detected (sensors + recommended action)
-      harvest   — HARVEST intent (M3 3-day schedule + M2 forecast)
-      text      — everything else (plain conversational response)
+      text      — everything else (plain conversational response, including
+                  HARVEST intent answers -- no ML schedule card anymore)
     """
-    intent  = state.get("intent", "KNOWLEDGE").upper()
     ml      = state.get("ml_outputs") or {}
     raw     = state.get("response", "")
     sensors = state.get("last_sensor_state") or {}
 
-    # --- DIAGNOSIS: anomaly flag from M1 ---
-    if ml.get("anomaly_flag"):
+    # --- DIAGNOSIS: anomaly flagged by the M1 rule engine ---
+    if ml.get("anomaly"):
         sensor_cards = []
         thresholds = {
             "pH":          {"unit": "",      "opt": "9.5–10.5", "min_ok": 9.5, "max_ok": 10.5},
@@ -652,33 +573,12 @@ def _build_content(state: AgentState) -> dict:
                 "isAlert": is_alert,
             })
         return {
-            "type":    "diagnosis",
-            "cause":   raw,
-            "sensors": sensor_cards,
-            "action":  {"dose": "", "note": raw},
-            "score":   ml.get("score", 0),
-            "severity":ml.get("severity", "low"),
-            "trend":   ml.get("trend", "stable"),
-        }
-
-    # --- HARVEST: M3 schedule available ---
-    if intent == "HARVEST" and ml.get("harvest"):
-        h      = ml["harvest"]
-        today  = h.get("today",     {})
-        tmrw   = h.get("tomorrow",  {})
-        d2     = h.get("day_after", {})
-        rec    = h.get("recommendation", "")
-        tf     = ml.get("turbidity_forecast") or {}
-        return {
-            "type":      "harvest",
-            "body":      raw,
-            "schedule":  {
-                "today":     today,
-                "tomorrow":  tmrw,
-                "day_after": d2,
-            },
-            "recommendation": rec,
-            "turbidity_forecast": tf,
+            "type":          "diagnosis",
+            "cause":         raw,
+            "sensors":       sensor_cards,
+            "action":        {"dose": "", "note": raw},
+            "severity":      ml.get("severity") or "low",
+            "rule_findings": ml.get("rule_findings") or [],
         }
 
     # --- DEFAULT: plain text ---

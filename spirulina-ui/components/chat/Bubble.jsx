@@ -50,95 +50,6 @@ function DiagnosisContent({ content }) {
   );
 }
 
-/* ── Harvest card ───────────────────────────────────────────────────────── */
-function HarvestContent({ content }) {
-  const { C } = useTheme();
-  const days = [
-    { data: content.schedule?.today    || {}, label: "TODAY"     },
-    { data: content.schedule?.tomorrow  || {}, label: "TOMORROW"  },
-    { data: content.schedule?.day_after || {}, label: "DAY AFTER" },
-  ];
-  const best    = days.reduce((a, b) => (b.data.harvest_pct || 0) > (a.data.harvest_pct || 0) ? b : a, days[0]);
-  const bestPct = best.data.harvest_pct || 0;
-  const tf      = content.turbidity_forecast || {};
-
-  return (
-    <div>
-      {bestPct > 0 ? (
-        <div style={{
-          display: "flex", alignItems: "center", gap: 10,
-          padding: "10px 13px", background: C.greenSoft,
-          border: `1px solid ${C.green}30`, borderRadius: 10,
-          marginBottom: 12, boxShadow: C.glowSm,
-        }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: C.green }}>
-              {best.label === "TODAY" ? "Ready to harvest today" : `Best window — ${best.label.toLowerCase()}`}
-            </div>
-            <div style={{ fontSize: 10, color: C.text3, fontFamily: C.mono, marginTop: 2 }}>
-              {bestPct}% yield · M3 confidence {Math.round((best.data.confidence || 0) * 100)}%
-            </div>
-          </div>
-        </div>
-      ) : (
-        <div style={{ padding: "10px 13px", background: C.card2, borderRadius: 8, marginBottom: 12, fontSize: 13, color: C.text2 }}>
-          Culture not yet ready for harvest.
-        </div>
-      )}
-
-      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        {days.map((d, i) => {
-          const isTop = d.label === best.label && bestPct > 0;
-          return (
-            <div key={i} style={{
-              flex: 1, textAlign: "center",
-              background: isTop ? C.greenSoft : C.card2,
-              border: `1px solid ${isTop ? C.green + "40" : C.border}`,
-              borderRadius: 8, padding: "10px 6px",
-            }}>
-              <div style={{ fontSize: 9, color: C.text3, fontFamily: C.mono, marginBottom: 3 }}>{d.label}</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: isTop ? C.green : C.text }}>
-                {d.data.harvest_pct || 0}%
-              </div>
-              <div style={{ fontSize: 9, color: C.text3, marginTop: 3, fontFamily: C.mono }}>{d.data.label || "not_ready"}</div>
-            </div>
-          );
-        })}
-      </div>
-
-      {content.body && <MarkdownRenderer content={content.body} />}
-
-      {content.recommendation && (
-        <div style={{ marginTop: 10, background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px" }}>
-          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: 1.2, color: C.text3, fontFamily: C.mono, marginBottom: 5, textTransform: "uppercase" }}>
-            M3 Recommendation
-          </div>
-          <div style={{ fontSize: 13, color: C.text2, lineHeight: 1.55 }}>{content.recommendation}</div>
-        </div>
-      )}
-
-      {tf.prediction && (
-        <div style={{ marginTop: 10, background: C.card2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px" }}>
-          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: 1.2, color: C.text3, fontFamily: C.mono, marginBottom: 8, textTransform: "uppercase" }}>
-            M2 Turbidity Forecast — Tomorrow
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            {[["Low", tf.low], ["Predicted", tf.prediction], ["High", tf.high]].map(([lbl, v], i) => (
-              <div key={i} style={{ flex: 1, textAlign: "center" }}>
-                <div style={{ fontSize: 9, color: C.text3, fontFamily: C.mono }}>{lbl}</div>
-                <div style={{ fontSize: 15, fontWeight: 700, color: i === 1 ? C.green : C.text2 }}>
-                  {typeof v === "number" ? v.toFixed(1) : (v ?? "—")}
-                </div>
-                <div style={{ fontSize: 9, color: C.text3, fontFamily: C.mono }}>NTU</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 /* ── Tool call log ──────────────────────────────────────────────────────── */
 function ToolCallLog({ calls }) {
   const { C } = useTheme();
@@ -300,7 +211,6 @@ export default function Bubble({ msg }) {
             {/* Main content */}
             <div style={{ padding: "13px 14px" }}>
               {content.type === "diagnosis" && <DiagnosisContent content={content} />}
-              {content.type === "harvest"   && <HarvestContent   content={content} />}
               {(content.type === "text" || !content.type) && (
                 <MarkdownRenderer content={content.text || msg.text || ""} />
               )}

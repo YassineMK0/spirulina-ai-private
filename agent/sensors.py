@@ -26,10 +26,13 @@ Call get_history(container_id) to get the rolling buffer for ML model inference.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from datetime import datetime, timezone
 from typing import Any
+
+log = logging.getLogger("spirulina.sensors")
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -59,8 +62,7 @@ def start_mqtt_subscriber() -> None:
     try:
         import paho.mqtt.client as mqtt
     except ImportError:
-        print("[sensors] paho-mqtt not installed — MQTT updates disabled. "
-              "Install: pip install paho-mqtt")
+        log.error("paho-mqtt not installed — MQTT updates disabled. Install: pip install paho-mqtt")
         return
 
     host, port = _parse_broker_url(MQTT_BROKER_URL)
@@ -77,9 +79,9 @@ def start_mqtt_subscriber() -> None:
         rc = reason_code if isinstance(reason_code, int) else reason_code.value
         if rc == 0:
             client.subscribe(topic)
-            print(f"[sensors] MQTT connected  topic={topic}")
+            log.info("MQTT connected  topic=%s", topic)
         else:
-            print(f"[sensors] MQTT connection failed  rc={rc}")
+            log.error("MQTT connection failed  rc=%s", rc)
 
     def on_message(client, userdata, msg):
         try:
@@ -91,19 +93,20 @@ def start_mqtt_subscriber() -> None:
                 _cache[container_id] = reading
             from data.store import sensor_store
             sensor_store.push(container_id, reading)
-            print(f"[sensors] received  container={container_id}  pH={reading.get('pH')}  EC={reading.get('EC')}  DO={reading.get('DO')}")
+            log.info("received  container=%s  pH=%s  EC=%s  DO=%s",
+                     container_id, reading.get("pH"), reading.get("EC"), reading.get("DO"))
         except Exception as exc:
-            print(f"[sensors] MQTT message parse error: {exc}")
+            log.error("MQTT message parse error: %s", exc, exc_info=True)
 
     if _mqtt_v2:
-        def on_disconnect(client, userdata, disconnect_flags, reason_code, properties):
+        def on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties):
             rc = reason_code.value if hasattr(reason_code, "value") else reason_code
             if rc != 0:
-                print(f"[sensors] MQTT disconnect rc={rc} — reconnecting")
+                log.warning("MQTT disconnect rc=%s — reconnecting", rc)
     else:
-        def on_disconnect(client, userdata, rc):
+        def on_disconnect(_client, _userdata, rc):
             if rc != 0:
-                print(f"[sensors] MQTT disconnect rc={rc} — reconnecting")
+                log.warning("MQTT disconnect rc=%s — reconnecting", rc)
 
     client.on_connect    = on_connect
     client.on_message    = on_message
@@ -116,11 +119,10 @@ def start_mqtt_subscriber() -> None:
             try:
                 client.connect(host, port, keepalive=60)
                 client.loop_forever()
-                # loop_forever returns only on explicit disconnect
             except Exception as exc:
-                print(f"[sensors] MQTT error: {exc} — retrying in {delay}s")
+                log.error("MQTT error: %s — retrying in %ds", exc, delay)
             _time.sleep(delay)
-            delay = min(delay * 2, 60)   # exponential back-off, cap at 60s
+            delay = min(delay * 2, 60)
 
     threading.Thread(target=_run, daemon=True, name="mqtt-subscriber").start()
 
@@ -222,18 +224,37 @@ if __name__ == "__main__":
         "temperature": 36.0, "luminosity": 12000.0, "turbidity": 200.0,
     }
 
-    # Crash values aligned to model critical bounds (EC in µS/cm; model sees mS/cm).
-    # Model crits: pH < 8.5/>11.5, EC < 12 mS/cm/>30 mS/cm, temp < 20/>41, DO < 4.0, turb > 760 NTU.
+    # Two independent severity layers fire on every reading:
+    #   rule   = agent.monitor.check_thresholds (hardcoded, basic, "harvest" tier exists)
+    #   M1     = models/anomaly_model rules.py (pH<8.5/>11.5, EC<10/>30 mS/cm, temp<20/>41,
+    #            DO<4.0 daytime; EC auto-converted uS/cm->mS/cm by agent.monitor._to_snapshot)
+    # M1 has NO low-EC rule via the basic threshold layer and rule has no equivalent
+    # for EC<10mS/cm dilution -- ec_dilution below only fires through M1, which is
+    # exactly the case that was silently broken before the Turbidite KeyError fix
+    # earlier this session (M1 raised on every call and was swallowed silently).
+    # Turbidite/OD680 has no calibration from the NTU turbidity sensor, so it's never
+    # sent to M1 -- the "harvest" scenario below only exercises the rule layer.
+    # When both layers disagree, run_monitor_check/generate_alert_text upgrade to
+    # the higher severity -- see "upgraded" notes below.
     _SCENARIOS = {
-        "ph_crash":    {"pH": 7.0},                                       # < 8.5  crit
-        "ph_high":     {"pH": 12.0},                                      # > 11.5 crit
-        "temp_hot":    {"temperature": 43.0},                             # > 41   crit
-        "temp_cold":   {"temperature": 15.0},                             # < 20   crit
-        "harvest":     {"turbidity": 820.0},                              # > 760 NTU crit
-        "ec_dilution": {"EC": 5000.0},                                    # 5 mS/cm < 12 crit
-        "ec_high":     {"EC": 35000.0},                                   # 35 mS/cm > 30 crit
-        "do_low":      {"DO": 2.0},                                       # < 4.0  crit
-        "multi":       {"pH": 7.0, "DO": 2.0, "temperature": 43.0},      # 3 at once
+        "ph_crash":    {"overrides": {"pH": 7.0},
+                        "expect": "rule=critical (pH<7.5) | M1=critical (pH<8.5)"},
+        "ph_high":     {"overrides": {"pH": 12.0},
+                        "expect": "rule=warning (pH>10.8) | M1=critical (pH>11.5) -> upgraded to critical"},
+        "temp_hot":    {"overrides": {"temperature": 43.0},
+                        "expect": "rule=warning (temp>39) | M1=critical (temp>41) -> upgraded to critical"},
+        "temp_cold":   {"overrides": {"temperature": 15.0},
+                        "expect": "rule=warning (temp<20) | M1=critical (temp<20) -> upgraded to critical"},
+        "harvest":     {"overrides": {"turbidity": 820.0},
+                        "expect": "rule=harvest tier (turbidity>300 NTU) | M1=not evaluated (no OD680 calibration)"},
+        "ec_dilution": {"overrides": {"EC": 5000.0},
+                        "expect": "rule=no match (no low-EC rule) | M1=critical (5 mS/cm < 10) -- M1-only catch"},
+        "ec_high":     {"overrides": {"EC": 35000.0},
+                        "expect": "rule=warning (EC>30000uS/cm) | M1=critical (35 mS/cm > 30) -> upgraded to critical"},
+        "do_low":      {"overrides": {"DO": 2.0},
+                        "expect": "rule=warning (DO<4) | M1=critical (DO<4, daytime) -> upgraded to critical"},
+        "multi":       {"overrides": {"pH": 7.0, "DO": 2.0, "temperature": 43.0},
+                        "expect": "3 simultaneous critical findings (pH, DO, temperature) on both layers"},
     }
 
     parser = argparse.ArgumentParser(description="Spirulina MQTT crash simulator")
@@ -242,7 +263,9 @@ if __name__ == "__main__":
     parser.add_argument("--scenario",  default="all",
                         help="Scenario name or 'all' (default: all)")
     parser.add_argument("--gap",       type=int, default=17,
-                        help="Seconds between scenarios (default 17 — one monitor cycle)")
+                        help="Seconds between scenarios (default 17 - one monitor cycle "
+                             "*if* the backend was started with MONITOR_RULE_INTERVAL_SECONDS=15 "
+                             "for testing; production default is 900s/15min, see api/main.py)")
     parser.add_argument("--sequential", action="store_true",
                         help="Send scenarios one by one with --gap between each. "
                              "Default: send all simultaneously for a burst of alerts.")
@@ -250,7 +273,41 @@ if __name__ == "__main__":
                         help="Backend URL for status check (default: http://localhost:8000)")
     parser.add_argument("--check",     action="store_true",
                         help="Check backend status before sending (shows sessions, queues, cache)")
+    parser.add_argument("--backfill-24h", action="store_true",
+                        help="Seed 24h of synthetic history directly into the DB (bypassing MQTT) "
+                             "with one deliberately anomalous reading, so the combination-model "
+                             "(LOF) 24h cron job has enough data to score immediately instead of "
+                             "waiting for real history to accumulate. Exits after seeding.")
     args = parser.parse_args()
+
+    # ── Backfill 24h of history for the combination-model (LOF) test ──────────
+    if args.backfill_24h:
+        from datetime import datetime, timedelta, timezone
+        from data.store import sensor_store
+
+        now = datetime.now(timezone.utc)
+        n = 13
+        for i in range(n):
+            ts = now - timedelta(hours=24) + timedelta(hours=2 * i)
+            hour = ts.hour
+            row = {
+                "timestamp":   ts.isoformat(),
+                "pH":          9.8, "EC": 20000.0, "DO": 7.5,
+                "temperature": 36.0 + 2 * ((hour % 24) / 24.0),
+                "luminosity":  12000 + 5000 * ((hour % 24) / 24.0),
+                "turbidity":   200.0, "status": "ok",
+            }
+            if i == 0:
+                # Deliberate outlier day, modeled on a flagged day from
+                # train.py's real benchmark (see model_comparison_report.md):
+                # elevated EC + DO relative to the rest of the window.
+                row.update({"pH": 9.65, "EC": 27000.0, "DO": 16.0})
+            sensor_store.push(args.container, row)
+        print(f"[backfill] seeded {n} readings over the last 24h for container={args.container}")
+        print(f"[backfill] day 0 is anomalous: pH=9.65 EC=27000 DO=16.0 (vs normal pH=9.8 EC=20000 DO=7.5)")
+        print(f"[backfill] now publish a live MQTT reading (any --scenario) so get_sensor_reading() has a cache hit,")
+        print(f"[backfill] then trigger the check: curl -X POST {args.api}/debug/run-combination-check/{args.container}")
+        raise SystemExit(0)
 
     # ── Optional backend status check ─────────────────────────────────────────
     if args.check:
@@ -340,9 +397,10 @@ if __name__ == "__main__":
     print()
 
     if args.sequential:
-        for name, overrides in selected:
+        for name, scenario in selected:
             print(f"[scenario] {name}")
-            _publish(overrides, name)
+            print(f"  [expect] {scenario['expect']}")
+            _publish(scenario["overrides"], name)
             print(f"  waiting {args.gap}s for monitor cycle...")
             _time.sleep(args.gap)
             _publish_normal("reset")
@@ -354,10 +412,14 @@ if __name__ == "__main__":
         # For maximum coverage, send the most critical one last.
         ordered = sorted(selected, key=lambda x: x[0])  # alphabetical, "multi" fires last
         print("[sim] sending burst...")
-        for name, overrides in ordered:
-            _publish(overrides, name)
+        for name, scenario in ordered:
+            print(f"  [expect] {name}: {scenario['expect']}")
+            _publish(scenario["overrides"], name)
             _time.sleep(0.3)
         print(f"\n[sim] done — monitor fires in up to {args.gap}s")
+        print("[sim] only the LAST published reading (alphabetically 'multi') will be the one")
+        print("[sim] actually evaluated by the next monitor cycle in burst mode -- use --sequential")
+        print("[sim] to see each scenario evaluated and reset individually.")
         print("[sim] check the Alerts panel in the app")
 
     client.loop_stop()

@@ -129,7 +129,7 @@ export default function AgentChat({
                   How can I help?
                 </div>
                 <div style={{ fontSize: 12, color: C.text3, fontFamily: C.mono }}>
-                  {tier === "pro" ? "Agent · Sensors · M1 · M2 · M3" : "Knowledge mode"}
+                  {tier === "pro" ? "Agent · Sensors · Anomaly Detector" : "Knowledge mode"}
                 </div>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center", maxWidth: 520 }}>
@@ -208,7 +208,7 @@ export default function AgentChat({
             </div>
           </div>
           <div style={{ fontSize: 10, color: C.text3, textAlign: "center", marginTop: 7, fontFamily: C.mono }}>
-            {tier === "pro" ? "M1 Anomaly · M2 Growth · M3 Harvest · RAG · Live sensors" : "Knowledge mode — upgrade to Pro for sensor monitoring + ML"}
+            {tier === "pro" ? "M1 Anomaly Detector · RAG · Live sensors" : "Knowledge mode — upgrade to Pro for sensor monitoring + ML"}
           </div>
         </div>
       </div>

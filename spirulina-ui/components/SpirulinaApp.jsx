@@ -203,8 +203,13 @@ function useChatState(userId, isPro) {
     if (!isPro) return;
     const now = () => new Date().toTimeString().slice(0, 5);
     return connectAlerts(userId, CONTAINER_ID, {
-      onAlert: (text) => {
-        const entry = { text, time: now(), severity: "medium" };
+      onAlert: (text, meta) => {
+        const entry = {
+          text, time: now(),
+          severity: meta?.severity || "medium",
+          affected: meta?.affected || [],
+          source:   meta?.source   || "model",
+        };
         setAllAlerts ((a) => [...a, entry]);
         setChatAlerts((a) => [...a, entry]);
       },

@@ -1,0 +1,20 @@
+
+echo "[pre-commit] checking staged Python files for syntax errors..."
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM -- '*.py')
+if [ -n "$STAGED_PY" ]; then
+  echo "$STAGED_PY" | xargs .venv/Scripts/python.exe -m py_compile || {
+    echo "[pre-commit] Python syntax check FAILED -- fix the file(s) above before committing."
+    exit 1
+  }
+fi
+
+STAGED_FRONTEND=$(git diff --cached --name-only --diff-filter=ACM -- 'spirulina-ui/*.js' 'spirulina-ui/*.jsx')
+if [ -n "$STAGED_FRONTEND" ]; then
+  echo "[pre-commit] running frontend tests (jest)..."
+  (cd spirulina-ui && npm test -- --silent) || {
+    echo "[pre-commit] jest FAILED -- fix failing frontend tests before committing."
+    exit 1
+  }
+fi
+
+echo "[pre-commit] OK"

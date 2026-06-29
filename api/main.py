@@ -31,6 +31,12 @@ from pydantic import BaseModel
 
 load_dotenv()
 
+from api.logging_setup import setup_logging
+setup_logging()
+
+import logging
+log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # SSE alert queues
@@ -40,34 +46,48 @@ _alert_queues: dict[str, asyncio.Queue] = {}
 _event_loop = None
 
 
-def _push_alert(user_id: str, alert_text: str) -> None:
+# agent/monitor.py severity vocabulary -> frontend display vocabulary
+_SEVERITY_DISPLAY = {"critical": "critical", "warning": "medium", "harvest": "low"}
+
+
+def _push_alert(
+    user_id: str,
+    alert_text: str,
+    severity: str = "warning",
+    affected: list | None = None,
+    source: str = "model",
+) -> None:
     q = _alert_queues.get(user_id)
     if q and _event_loop:
-        _event_loop.call_soon_threadsafe(q.put_nowait, alert_text)
-        print(f"[alert] pushed to user={user_id[:8]}...")
+        item = {
+            "text":     alert_text,
+            "severity": _SEVERITY_DISPLAY.get(severity, "medium"),
+            "affected": affected or [],
+            "source":   source,
+        }
+        _event_loop.call_soon_threadsafe(q.put_nowait, item)
+        log.info("alert pushed  user=%s", user_id[:8])
     else:
-        print(f"[alert] DROPPED — queue={q is not None} loop={_event_loop is not None} user={user_id[:8]}...")
+        log.warning("alert DROPPED  queue=%s loop=%s user=%s",
+                    q is not None, _event_loop is not None, user_id[:8])
 
 
 def _background_warmup():
+    _wlog = logging.getLogger("spirulina.warmup")
     try:
         from rag.retriever.retrieve import _get_collection, _get_bm25_index
         _get_collection()
         _get_bm25_index(None, None)
-        print("[warmup] bge-m3 + BM25 ready")
+        _wlog.info("bge-m3 + BM25 ready")
     except Exception as e:
-        print(f"[warmup] retriever: {e}")
-    for name, loader in [
-        ("M1 IsolationForest", lambda: __import__("api.predict_isolationforest", fromlist=["load_artifact"]).load_artifact()),
-        ("M2 LightGBM",       lambda: __import__("api.predict_lgbm",          fromlist=["load_artifact"]).load_artifact()),
-        ("M3 harvest",        lambda: __import__("api.predict_lgbm_harvest",  fromlist=["load_artifacts"]).load_artifacts()),
-    ]:
-        try:
-            loader()
-            print(f"[warmup] {name} ready")
-        except Exception as e:
-            print(f"[warmup] {name}: {e}")
-    print("[warmup] done")
+        _wlog.error("retriever warmup failed: %s", e)
+    try:
+        from models.anomaly_model.detector import AnomalyDetector
+        AnomalyDetector.load()
+        _wlog.info("M1 anomaly detector ready")
+    except Exception as e:
+        _wlog.error("M1 anomaly detector warmup failed: %s", e)
+    _wlog.info("done")
 
 
 @asynccontextmanager
@@ -80,31 +100,49 @@ async def lifespan(app: FastAPI):
         from agent.graph import graph as _g
         global _graph
         _graph = _g
-        print("[startup] graph compiled")
+        log.info("graph compiled")
     except Exception as e:
-        print(f"[startup] graph failed: {e}")
+        log.error("graph failed: %s", e)
 
     threading.Thread(target=_background_warmup, daemon=True, name="warmup").start()
 
     try:
         from agent.sensors import start_mqtt_subscriber
         start_mqtt_subscriber()
-        print("[startup] MQTT subscriber started")
+        log.info("MQTT subscriber started")
     except Exception as e:
-        print(f"[startup] MQTT: {e}")
+        log.error("MQTT startup failed: %s", e)
 
     try:
+        import os
+
         from apscheduler.schedulers.background import BackgroundScheduler
-        from agent.monitor import run_monitor_check
+        from agent.monitor import run_monitor_check, run_combination_model_check
+
+        # Rule engine (check_thresholds + anomaly_model rules/seasonal): cheap,
+        # runs on real MQTT cadence (default 900s = 15min). Override to e.g. 15s
+        # locally for the agent/sensors.py crash simulator / fast demoing.
+        rule_interval_seconds = int(os.getenv("MONITOR_RULE_INTERVAL_SECONDS", "900"))
+
         scheduler = BackgroundScheduler()
-        scheduler.add_job(lambda: run_monitor_check(_push_alert), "interval", seconds=15, max_instances=3)
+        scheduler.add_job(
+            lambda: run_monitor_check(_push_alert),
+            "interval", seconds=rule_interval_seconds, max_instances=3,
+        )
+        # Combination model (LOF): slow-moving 24h-history signal, scored once
+        # a day at a fixed wall-clock time rather than relative to app startup.
+        scheduler.add_job(
+            lambda: run_combination_model_check(_push_alert),
+            "cron", hour=0, minute=5, max_instances=1,
+        )
         scheduler.start()
-        print("[startup] monitor scheduler started")
+        log.info("monitor scheduler started  rule_interval=%ss  combination_model=cron(00:05)",
+                  rule_interval_seconds)
     except Exception as e:
-        print(f"[startup] scheduler: {e}")
+        log.error("scheduler failed: %s", e)
         scheduler = None
 
-    print("[startup] ready")
+    log.info("startup complete")
     yield
 
     try:
@@ -179,6 +217,16 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/containers")
+def list_containers():
+    """List known container IDs — live MQTT cache + DB history, deduplicated."""
+    from agent.sensors import _cache
+    from data.store import sensor_store
+
+    ids = set(_cache.keys()) | set(sensor_store.list_containers())
+    return {"containers": sorted(ids) or ["container-01"]}
+
+
 @app.get("/status")
 def status():
     """Diagnostic endpoint — shows active monitor sessions and SSE connections."""
@@ -191,6 +239,25 @@ def status():
         "event_loop_ready":   _event_loop is not None,
         "cached_containers":  list(_cache.keys()),
         "latest_sensors":     {cid: get_sensor_reading(cid) for cid in _cache},
+    }
+
+
+@app.post("/debug/run-combination-check/{container_id}")
+def debug_run_combination_check(container_id: str):
+    """Manually trigger the combination-model (LOF) check for one container,
+    instead of waiting for its 00:05 daily cron tick. Dev/testing only --
+    pairs with `python agent/sensors.py --backfill-24h` to seed enough
+    history, then this fires the scoring immediately."""
+    from agent.monitor import register_session, run_combination_model_check, _build_daily_context
+
+    register_session(f"debug-{container_id}", container_id)
+    daily_context = _build_daily_context(container_id)
+    run_combination_model_check(_push_alert)
+    return {
+        "ran": True,
+        "daily_context": daily_context,
+        "note": "check the /alerts SSE stream or backend logs for the result; "
+                "no daily_context means not enough history yet.",
     }
 
 
@@ -337,48 +404,17 @@ def get_sensors(container_id: str):
 
 @app.get("/models/{container_id}")
 def get_model_outputs(container_id: str):
-    import numpy as np
-    import pandas as pd
-    from agent.sensors import get_history
+    """M1 anomaly detector output -- the only ML model in the pipeline
+    (rule engine + seasonal check). The combination model (LOF) layer isn't
+    included here -- it's a 24h-cadence signal scored by its own cron job
+    (agent.monitor.run_combination_model_check), not a per-request prediction."""
+    from agent.monitor import _run_ml_prediction
 
-    history = get_history(container_id)
-    if not history:
+    ml = _run_ml_prediction(container_id)
+    if not ml:
         return JSONResponse(content={"error": "no_data"}, headers={"Cache-Control": "no-store"})
 
-    df     = pd.DataFrame(history)
-    result = {"m1": {}, "m2": {}, "m3": {}, "readings": len(history)}
-
-    try:
-        from api.predict_isolationforest import predict_df, load_artifact as load_m1
-        out  = predict_df(df, load_m1())
-        last = out.iloc[-1]
-        score = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
-        result["m1"] = {"anomaly": bool(last["is_anomaly"]), "score": round(score, 4),
-                        "severity": str(last["severity"]), "trend": str(last["trend_direction"])}
-    except Exception as exc:
-        result["m1"] = {"error": str(exc)}
-
-    try:
-        from api.predict_lgbm import predict, load_artifact as load_m2
-        out = predict(df, load_m2())
-        result["m2"] = {"low": round(out["low"], 1), "prediction": round(out["prediction"], 1),
-                        "high": round(out["high"], 1)}
-    except Exception as exc:
-        result["m2"] = {"error": str(exc)}
-
-    try:
-        from api.predict_lgbm_harvest import schedule, load_artifacts as load_m3
-        m3_art, m2_art = load_m3()
-        out   = schedule(df, m3_art, m2_art)
-        today = out.get("today", {})
-        result["m3"] = {"recommendation": out.get("recommendation", ""),
-                        "harvest_pct": today.get("harvest_pct", 0),
-                        "confidence":  today.get("confidence",  0),
-                        "tomorrow_pct": out.get("tomorrow", {}).get("harvest_pct", 0)}
-    except Exception as exc:
-        result["m3"] = {"error": str(exc)}
-
-    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
+    return JSONResponse(content={"m1": ml}, headers={"Cache-Control": "no-store"})
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +435,8 @@ async def alerts_sse(user_id: str, container_id: str = ""):
             yield 'data: {"type":"connected"}\n\n'
             while True:
                 try:
-                    text    = await asyncio.wait_for(q.get(), timeout=30.0)
-                    payload = json.dumps({"type": "alert", "text": text})
+                    item    = await asyncio.wait_for(q.get(), timeout=30.0)
+                    payload = json.dumps({"type": "alert", **item})
                     yield f"data: {payload}\n\n"
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"

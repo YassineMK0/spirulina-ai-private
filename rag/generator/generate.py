@@ -287,70 +287,39 @@ def _format_sensor_block(sensor: dict) -> str:
 
 
 def _format_ml_block(ml: dict) -> str:
-    """Format ML model outputs into an XML block for the LLM prompt, or '' if empty.
-
-    Three cases handled explicitly so the reasoning model gets clean, structured data:
-      - Anomaly (M1)    : severity, score, primary sensor
-      - Harvest (M3)    : 3-day schedule with harvest %, confidence, recommendation
-      - Turbidity (M2)  : next-day p10/p50/p90 forecast
+    """Format the M1 anomaly detector's output into an XML block for the LLM
+    prompt, or '' if empty. `ml` is the dict shape produced by
+    agent.monitor._run_ml_prediction: {anomaly, severity, rule_findings,
+    seasonal}. The combination model (LOF) is a separate 24h-cadence signal
+    scored by its own cron job, not part of per-message ml_outputs.
     """
     if not ml:
         return ""
 
     lines: list[str] = []
 
-    # ── M1: anomaly detection ────────────────────────────────────────────────
     if ml.get("anomaly"):
+        findings = ml.get("rule_findings") or []
+        finding_str = "; ".join(f"{f['label']} ({f['detail']})" for f in findings) or "undetermined"
         lines += [
             "  [M1 ANOMALY DETECTOR]",
-            f"  anomaly:   YES",
-            f"  severity:  {ml.get('severity', '?').upper()}",
-            f"  score:     {ml.get('score', 0):.3f}  (0=normal  1=critical)",
-            f"  trend:     {ml.get('trend', 'unknown')}",
+            "  anomaly:   YES",
+            f"  severity:  {(ml.get('severity') or '?').upper()}",
+            f"  findings:  {finding_str}",
         ]
-    elif "score" in ml:
+    elif "rule_findings" in ml or "seasonal" in ml:
         lines += [
             "  [M1 ANOMALY DETECTOR]",
-            f"  anomaly:   NO  (score={ml.get('score', 0):.3f})",
+            "  anomaly:   NO",
         ]
 
-    # ── M3: harvest schedule ─────────────────────────────────────────────────
-    harvest = ml.get("harvest")
-    if harvest:
-        if harvest.get("cold_start"):
-            lines += [
-                "",
-                "  [M3 HARVEST SCHEDULER]",
-                f"  status: NOT ENOUGH DATA",
-                f"  {harvest.get('recommendation', '')}",
-            ]
-        else:
-            today  = harvest.get("today",     {})
-            tmrw   = harvest.get("tomorrow",  {})
-            d2     = harvest.get("day_after", {})
-            rec    = harvest.get("recommendation", "—")
-            lines += [
-                "",
-                "  [M3 HARVEST SCHEDULER]",
-                f"  today      → {today.get('label','?'):12s}  harvest {today.get('harvest_pct',0):2d}%  "
-                f"confidence {today.get('confidence',0):.0%}",
-                f"  tomorrow   → {tmrw.get('label','?'):12s}  harvest {tmrw.get('harvest_pct',0):2d}%  "
-                f"confidence {tmrw.get('confidence',0):.0%}",
-                f"  day after  → {d2.get('label','?'):12s}  harvest {d2.get('harvest_pct',0):2d}%  "
-                f"confidence {d2.get('confidence',0):.0%}",
-                f"  recommendation: {rec}",
-            ]
-
-    # ── M2: turbidity forecast ───────────────────────────────────────────────
-    tf = ml.get("turbidity_forecast")
-    if tf and not tf.get("cold_start"):
-        lines += [
-            "",
-            "  [M2 TURBIDITY FORECAST — tomorrow]",
-            f"  low:        {tf.get('low', '?')} NTU",
-            f"  predicted:  {tf.get('prediction', '?')} NTU",
-            f"  high:       {tf.get('high', '?')} NTU",
-        ]
+    seasonal_hits = [
+        f"{sensor} z={v['zscore']:.1f}"
+        for sensor, v in (ml.get("seasonal") or {}).items()
+        if v.get("anomaly")
+    ]
+    if seasonal_hits:
+        lines.append(f"  seasonal deviation: {', '.join(seasonal_hits)}")
 
     if not lines:
         return ""

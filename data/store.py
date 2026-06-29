@@ -128,6 +128,46 @@ class SensorStore:
             if None not in (r[1], r[2], r[3], r[4], r[5], r[6])
         ]
 
+    def get_since(self, container_id: str, since_iso: str) -> list[dict[str, Any]]:
+        """Return all readings for container_id with ts >= since_iso, oldest first.
+
+        Unlike get_latest(), does not require every sensor column to be
+        non-null -- used for building rolling aggregates (e.g. the
+        combination-model daily_context) where a partial row is still useful.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT ts, pH, EC, DO, temperature, luminosity, turbidity
+                FROM sensor_readings
+                WHERE container_id = ? AND ts >= ?
+                ORDER BY ts ASC
+                """,
+                (container_id, since_iso),
+            )
+            rows = cur.fetchall()
+
+        return [
+            {
+                "date":        r[0],
+                "pH":          r[1],
+                "EC":          r[2],
+                "DO":          r[3],
+                "temperature": r[4],
+                "luminosity":  r[5],
+                "turbidity":   r[6],
+            }
+            for r in rows
+        ]
+
+    def list_containers(self) -> list[str]:
+        """Return distinct container IDs that have at least one stored reading."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT DISTINCT container_id FROM sensor_readings ORDER BY container_id"
+            )
+            return [r[0] for r in cur.fetchall()]
+
     def count(self, container_id: str) -> int:
         """Return total number of stored readings for a container."""
         with self._lock:

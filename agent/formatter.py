@@ -1,12 +1,10 @@
 """Response formatter — turns raw LLM text + state data into rich markdown.
 
-Five template types
--------------------
+Three template types
+--------------------
 1. RAG answer      plain answer with inline source hints
 2. Sensor card     markdown table: pH / EC / Temp / OD / Light + status icons
-3. Prediction      60-minute forecast table from ML outputs
-4. Harvest window  three-scenario harvest timing card
-5. Alert           INFO / WARNING / CRITICAL banner with emoji
+3. Alert           INFO / WARNING / CRITICAL banner with emoji
 
 The public entry point is ``format_message(state)``.
 It auto-selects and combines the relevant templates based on intent,
@@ -180,96 +178,8 @@ def template_sensor_card(sensor: dict[str, Any], container_id: str = "") -> str:
 # Template 3 — 60-minute prediction summary
 # ---------------------------------------------------------------------------
 
-def template_prediction(ml_outputs: dict[str, Any], sensor: dict[str, Any] | None = None) -> str:
-    """Forecast table built from ml_outputs['growth_prediction'] entries."""
-    pred = ml_outputs.get("growth_prediction") or ml_outputs.get("prediction")
-    if not pred:
-        return ""
-
-    header = f"## 🔮 60-Minute Forecast  ·  _{_ts()}_"
-
-    rows: list[str] = []
-
-    # Current vs forecast — accept either a nested dict or flat keys
-    if isinstance(pred, dict):
-        for metric, data in pred.items():
-            if isinstance(data, dict):
-                now_val  = data.get("current",  "—")
-                fut_val  = data.get("in_60min", "—")
-                trend    = data.get("trend",    "→ Stable")
-            else:
-                now_val  = (sensor or {}).get(metric, "—")
-                fut_val  = data
-                trend    = "→ Forecast"
-            rows.append(f"| {metric} | {now_val} | {fut_val} | {trend} |")
-    else:
-        # Scalar — treat as overall growth score
-        rows.append(f"| Growth score | — | {pred} | → Forecast |")
-
-    if not rows:
-        return ""
-
-    table = (
-        "| Metric | Now | In 60 min | Trend |\n"
-        "|--------|-----|-----------|-------|\n"
-        + "\n".join(rows)
-    )
-    return f"{header}\n\n{table}"
-
-
 # ---------------------------------------------------------------------------
-# Template 4 — Harvest window card
-# ---------------------------------------------------------------------------
-
-def template_harvest_card(ml_outputs: dict[str, Any], sensor: dict[str, Any] | None = None) -> str:
-    """Three-scenario harvest timing card from ml_outputs['harvest_readiness']."""
-    harvest = ml_outputs.get("harvest_readiness") or ml_outputs.get("harvest")
-    if not harvest:
-        return ""
-
-    header = "## 🌾 Harvest Window"
-
-    # Current density from sensor or ML
-    od_val = None
-    for key in ("od", "od680", "OD", "OD680"):
-        if key in sensor:
-            od_val = sensor[key]
-            break
-    if od_val is None and isinstance(harvest, dict):
-        od_val = harvest.get("current_od")
-
-    od_line = f"\n**Current OD680:** `{od_val}`  |  **Target:** `1.0–1.2`\n" if od_val else ""
-
-    # Build scenario rows — accept structured or simple string
-    if isinstance(harvest, dict) and "scenarios" in harvest:
-        scenarios = harvest["scenarios"]
-        rows = [
-            f"| {s.get('label','—')} | {s.get('timing','—')} | {s.get('yield_est','—')} |"
-            for s in scenarios
-        ]
-    elif isinstance(harvest, dict):
-        early   = harvest.get("early",   {})
-        balanced = harvest.get("balanced", {})
-        optimal  = harvest.get("optimal",  {})
-        rows = [
-            f"| Early (20%)       | {early.get('timing',   'Now')}       | {early.get('yield',   '~180 g')} |",
-            f"| Balanced (50%)    | {balanced.get('timing', 'Tomorrow')} | {balanced.get('yield', '~420 g')} |",
-            f"| ⭐ Optimal        | {optimal.get('timing',  '+2 days')}  | {optimal.get('yield',  '~520 g')} |",
-        ]
-    else:
-        # Scalar decision string (e.g. "harvest in 2 days")
-        rows = [f"| Recommendation | {harvest} | — |"]
-
-    table = (
-        "| Scenario | Timing | Est. Yield |\n"
-        "|----------|--------|------------|\n"
-        + "\n".join(rows)
-    )
-    return f"{header}{od_line}\n{table}"
-
-
-# ---------------------------------------------------------------------------
-# Template 5 — Alert banner
+# Template 3 — Alert banner
 # ---------------------------------------------------------------------------
 
 def template_alert(
@@ -324,15 +234,17 @@ def format_message(
     parts: list[str] = []
 
     # ── SYSTEM intent or anomaly alerts ─────────────────────────────────────
-    if intent == "SYSTEM" or ml_outputs.get("anomaly_flag"):
+    if intent == "SYSTEM" or ml_outputs.get("anomaly"):
         # Auto-detect alerts from sensor readings
         sensor_alerts = _alert_level_from_sensors(sensor)
-        # Also check ML anomaly output
-        if ml_outputs.get("anomaly_flag"):
+        # Also check the M1 anomaly detector's rule findings
+        if ml_outputs.get("anomaly"):
+            findings = ml_outputs.get("rule_findings") or []
+            detail = "; ".join(f"{f['label']} ({f['detail']})" for f in findings) or "Unusual pattern in culture data."
             sensor_alerts.append({
                 "level": "WARNING",
                 "parameter": "ML Anomaly",
-                "message": f"**Anomaly detected** — {ml_outputs.get('anomaly_detail', 'Unusual pattern in culture data.')}",
+                "message": f"**Anomaly detected** — {detail}",
                 "action": "Review your sensor history and inspect the culture visually.",
             })
         for alert_data in sensor_alerts:
@@ -345,20 +257,8 @@ def format_message(
             ))
 
     # ── Sensor card — show for UPDATE/SYSTEM or whenever an anomaly fires ───
-    if has_container and sensor and (intent in ("UPDATE", "SYSTEM") or ml_outputs.get("anomaly_flag")):
+    if has_container and sensor and (intent in ("UPDATE", "SYSTEM") or ml_outputs.get("anomaly")):
         parts.append(template_sensor_card(sensor, container_id))
-
-    # ── Harvest window (HARVEST intent) ─────────────────────────────────────
-    if intent == "HARVEST" and has_container and ml_outputs:
-        harvest_card = template_harvest_card(ml_outputs, sensor)
-        if harvest_card:
-            parts.append(harvest_card)
-
-    # ── 60-min prediction (available for any intent when ML has it) ──────────
-    if has_container and ml_outputs.get("growth_prediction"):
-        pred_card = template_prediction(ml_outputs, sensor)
-        if pred_card:
-            parts.append(pred_card)
 
     # ── LLM answer (always last, sources appended) ───────────────────────────
     answer_block = template_rag_answer(raw_answer, rag_context)

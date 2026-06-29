@@ -3,9 +3,9 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import AlertsPage from "@/components/alerts/AlertsPage";
 
 const mockAlerts = [
-  { severity: "critical", score: 0.91, trend: "declining", text: "pH dropped below 8.5.", time: "10:05" },
-  { severity: "medium",   score: 0.62, trend: "stable",    text: "EC is elevated.",       time: "09:30" },
-  { severity: "low",      score: 0.22, trend: "recovering", text: "DO recovering.",        time: "08:00" },
+  { severity: "critical", affected: ["pH"], source: "model",       text: "pH dropped below 8.5.", time: "10:05" },
+  { severity: "medium",   affected: ["EC"], source: "rule",        text: "EC is elevated.",       time: "09:30" },
+  { severity: "low",      affected: ["DO"], source: "rule+model",  text: "DO recovering.",        time: "08:00" },
 ];
 
 // ── empty state ───────────────────────────────────────────────────────────────
@@ -39,10 +39,17 @@ describe("AlertsPage — alert list", () => {
     expect(screen.getByText(/LOW/)).toBeInTheDocument();
   });
 
-  it("renders anomaly score and trend", () => {
+  it("renders affected parameters", () => {
     render(<AlertsPage alerts={mockAlerts} />);
-    expect(screen.getByText(/Score 0.910/)).toBeInTheDocument();
-    expect(screen.getByText(/Trend: declining/)).toBeInTheDocument();
+    expect(screen.getByText(/Affected: pH/)).toBeInTheDocument();
+    expect(screen.getByText(/Affected: EC/)).toBeInTheDocument();
+  });
+
+  it("renders the detection source instead of a fixed 'M1 Anomaly' label", () => {
+    render(<AlertsPage alerts={mockAlerts} />);
+    expect(screen.getByText(/M1 Model · CRITICAL/)).toBeInTheDocument();
+    expect(screen.getByText(/Threshold Rule · MEDIUM/)).toBeInTheDocument();
+    expect(screen.getByText(/Rule \+ Model · LOW/)).toBeInTheDocument();
   });
 
   it("renders timestamps", () => {

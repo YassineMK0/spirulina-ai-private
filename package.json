@@ -1,0 +1,12 @@
+{
+  "name": "spirulina-repo-tooling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Root-level tooling (git hooks) for the SpirulinaAI monorepo -- not a runtime package.",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

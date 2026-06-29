@@ -192,7 +192,7 @@ export function connectAlerts(userId, containerId, { onAlert, onConnect, onError
     try {
       const data = JSON.parse(e.data);
       if      (data.type === "connected") onConnect?.();
-      else if (data.type === "alert")     onAlert?.(data.text);
+      else if (data.type === "alert")     onAlert?.(data.text, { severity: data.severity, affected: data.affected, source: data.source });
     } catch { /* ignore malformed frames */ }
   };
 

@@ -12,9 +12,9 @@ describe("Bubble — alert role", () => {
     expect(screen.getByText("pH dropped to 8.1!")).toBeInTheDocument();
   });
 
-  it("renders the SSE label", () => {
+  it("renders the alert header label", () => {
     render(<Bubble msg={alertMsg} />);
-    expect(screen.getByText(/SSE ALERT/)).toBeInTheDocument();
+    expect(screen.getByText(/Anomaly Alert/i)).toBeInTheDocument();
   });
 
   it("renders the timestamp", () => {
@@ -104,79 +104,15 @@ describe("Bubble — agent role (diagnosis)", () => {
 
   it("renders sensor labels", () => {
     render(<Bubble msg={diagMsg} />);
-    // alert sensor renders "EC ▲"; non-alert sensor renders "pH" with no suffix
-    expect(screen.getByText("EC ▲")).toBeInTheDocument();
+    // alert sensor renders "EC ↑"; non-alert sensor renders "pH" with no suffix
+    expect(screen.getByText("EC ↑")).toBeInTheDocument();
     expect(screen.getByText("pH")).toBeInTheDocument();
   });
 
   it("renders the recommended action", () => {
     render(<Bubble msg={diagMsg} />);
-    expect(screen.getByText(/RECOMMENDED ACTION/)).toBeInTheDocument();
-    expect(screen.getByText("500mL fresh water")).toBeInTheDocument();
-  });
-});
-
-// ── agent role — harvest content ──────────────────────────────────────────────
-
-describe("Bubble — agent role (harvest)", () => {
-  const harvestMsg = {
-    role: "agent",
-    content: {
-      type: "harvest",
-      body: "Culture is in plateau phase. Harvest window is open.",
-      schedule: {
-        today:     { label: "moderate", harvest_pct: 20, confidence: 0.78 },
-        tomorrow:  { label: "heavy",    harvest_pct: 35, confidence: 0.85 },
-        day_after: { label: "heavy",    harvest_pct: 30, confidence: 0.80 },
-      },
-      recommendation: "Wait until tomorrow — harvest 35% instead of 20% today.",
-      turbidity_forecast: { low: 180, prediction: 210, high: 240 },
-    },
-    tools: ["ML models"],
-    time: "11:00",
-  };
-
-  it("renders the best day recommendation header", () => {
-    render(<Bubble msg={harvestMsg} />);
-    // "Wait — harvest tomorrow" appears in the header; multiple elements contain
-    // "tomorrow" so we target the specific header text
-    expect(screen.getByText("Wait — harvest tomorrow")).toBeInTheDocument();
-  });
-
-  it("renders the 3-day harvest percentages", () => {
-    render(<Bubble msg={harvestMsg} />);
-    expect(screen.getByText("20%")).toBeInTheDocument();
-    expect(screen.getByText("35%")).toBeInTheDocument();
-    expect(screen.getByText("30%")).toBeInTheDocument();
-  });
-
-  it("renders the M3 recommendation text", () => {
-    render(<Bubble msg={harvestMsg} />);
-    expect(screen.getByText(/Wait until tomorrow/)).toBeInTheDocument();
-  });
-
-  it("renders turbidity forecast section", () => {
-    render(<Bubble msg={harvestMsg} />);
-    expect(screen.getByText(/M2 TURBIDITY FORECAST/)).toBeInTheDocument();
-  });
-
-  it("renders 'Culture not ready' when harvest_pct is 0 for all days", () => {
-    const notReadyMsg = {
-      role: "agent",
-      content: {
-        type: "harvest",
-        body: "Culture is still growing.",
-        schedule: {
-          today:     { label: "not_ready", harvest_pct: 0, confidence: 0 },
-          tomorrow:  { label: "not_ready", harvest_pct: 0, confidence: 0 },
-          day_after: { label: "not_ready", harvest_pct: 0, confidence: 0 },
-        },
-      },
-      tools: [],
-      time: "12:00",
-    };
-    render(<Bubble msg={notReadyMsg} />);
-    expect(screen.getByText(/not ready for harvest/i)).toBeInTheDocument();
+    expect(screen.getByText(/recommended action/i)).toBeInTheDocument();
+    expect(screen.getByText("Dilute culture to reduce EC.")).toBeInTheDocument();
   });
 });
 

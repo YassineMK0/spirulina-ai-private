@@ -18,8 +18,11 @@ Threshold rules (hardcoded — ML models will replace these later):
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+log = logging.getLogger("spirulina.monitor")
 
 
 # ---------------------------------------------------------------------------
@@ -84,36 +87,130 @@ def check_thresholds(sensor: dict) -> list[dict]:
     return breaches
 
 
-def _run_ml_prediction(container_id: str) -> dict:
-    """Run M1 IsolationForest on the container history. Returns {} silently on failure."""
-    try:
-        import pandas as pd
-        from agent.sensors import get_history
-        from api.predict_isolationforest import predict_df, load_artifact
+_anomaly_detector = None  # lazy-loaded singleton (joblib load is not free)
 
-        history = get_history(container_id)
+# anomaly_model rule-finding parameter names -> agent sensor reading keys
+_PARAM_TO_SENSOR_KEY = {
+    "pH": "pH", "EC": "EC", "DO": "DO",
+    "Temperature": "temperature", "Luminosite": "luminosity",
+}
+
+
+def _get_anomaly_detector():
+    global _anomaly_detector
+    if _anomaly_detector is None:
+        from models.anomaly_model.detector import AnomalyDetector
+        _anomaly_detector = AnomalyDetector.load()
+    return _anomaly_detector
+
+
+def _normalize_ec(ec: float | None) -> float | None:
+    """Agent reports EC in uS/cm, the model was trained on mS/cm."""
+    if ec is not None and ec > 100:
+        return ec / 1000.0
+    return ec
+
+
+def _to_snapshot(row: dict) -> dict:
+    """Map an agent sensor row to the anomaly_model snapshot format.
+
+    Turbidite is intentionally omitted: the agent's turbidity sensor reports
+    NTU and no NTU->OD680 conversion factor exists yet. rules.evaluate_rules
+    treats a missing Turbidite key as "skip that check" (see rules.py), and
+    the combination model was retrained without Turbidite as a feature
+    entirely -- see models/anomaly_model/README.md.
+    """
+    return {
+        "pH":          row.get("pH"),
+        "EC":          _normalize_ec(row.get("EC")),
+        "DO_mgL":      row.get("DO"),
+        "Temperature": row.get("temperature"),
+        "Luminosite":  row.get("luminosity"),
+    }
+
+
+def _build_daily_context(container_id: str) -> dict | None:
+    """Aggregate the last 24h of stored readings into the feature vector the
+    combination model (LOF) expects (pH/EC/DO_mgL + their day-over-day diff,
+    Temperature/Luminosite mean/min/max). Returns None if there isn't enough
+    history yet -- the combination-model check just skips that container
+    until the agent has accumulated a day of readings."""
+    from data.store import sensor_store
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    rows = sensor_store.get_since(container_id, since)
+    if len(rows) < 2:
+        return None
+
+    temps = [r["temperature"] for r in rows if r.get("temperature") is not None]
+    lums  = [r["luminosity"]  for r in rows if r.get("luminosity")  is not None]
+    if not temps or not lums:
+        return None
+
+    current, oldest = rows[-1], rows[0]
+    ec_now = _normalize_ec(current.get("EC"))
+    ec_old = _normalize_ec(oldest.get("EC"))
+    if current.get("pH") is None or ec_now is None or current.get("DO") is None:
+        return None
+
+    return {
+        "pH":               current["pH"],
+        "EC":               ec_now,
+        "DO_mgL":           current["DO"],
+        "Temperature_mean": sum(temps) / len(temps),
+        "Temperature_min":  min(temps),
+        "Temperature_max":  max(temps),
+        "Luminosite_mean":  sum(lums) / len(lums),
+        "Luminosite_min":   min(lums),
+        "Luminosite_max":   max(lums),
+        "pH_diff":          current["pH"] - (oldest.get("pH") if oldest.get("pH") is not None else current["pH"]),
+        "EC_diff":          ec_now - (ec_old if ec_old is not None else ec_now),
+        "DO_mgL_diff":      current["DO"] - (oldest.get("DO") if oldest.get("DO") is not None else current["DO"]),
+    }
+
+
+def _run_ml_prediction(container_id: str) -> dict:
+    """Run the M1 anomaly detector (rules + Isolation Forest + seasonal) on the
+    container's recent history. Returns {} silently on failure."""
+    try:
+        from agent.sensors import get_history
+
+        history = get_history(container_id, n=2)
         if not history:
             return {}
 
-        artifact = load_artifact()
-        df       = pd.DataFrame(history)
-        result   = predict_df(df, artifact)
-        last     = result.iloc[-1]
+        current  = history[-1]
+        previous = history[-2] if len(history) > 1 else None
 
-        import numpy as np
-        import json as _json
-        score = float(last["anomaly_score"]) if not np.isnan(last["anomaly_score"]) else 0.0
-        attr_raw = last.get("sensor_attribution", "{}")
-        attr = _json.loads(attr_raw) if isinstance(attr_raw, str) else (attr_raw or {})
+        hour_of_day        = None
+        minutes_since_prev = None
+        try:
+            now_ts = datetime.fromisoformat(current["date"])
+            hour_of_day = now_ts.hour + now_ts.minute / 60.0
+            if previous:
+                prev_ts = datetime.fromisoformat(previous["date"])
+                minutes_since_prev = (now_ts - prev_ts).total_seconds() / 60.0
+        except (KeyError, ValueError):
+            pass
+
+        detector = _get_anomaly_detector()
+        result = detector.evaluate(
+            snapshot=_to_snapshot(current),
+            previous=_to_snapshot(previous) if previous else None,
+            minutes_since_prev=minutes_since_prev,
+            hour_of_day=hour_of_day,
+            daily_context=None,  # IF layer needs Turbidite -- disabled, see _to_snapshot
+        )
+
+        overall = result["overall_severity"]
         return {
-            "anomaly":            bool(last["is_anomaly"]),
-            "score":              round(score, 4),
-            "severity":           str(last["severity"]),
-            "trend":              str(last["trend_direction"]),
-            "sensor_attribution": attr,
+            "anomaly":       overall >= 2,
+            "severity":      {3: "critical", 2: "warning"}.get(overall),
+            "rule_findings": result["rule_findings"],
+            "seasonal":      result["seasonal"],
         }
     except Exception as exc:
-        print(f"[monitor] ML prediction failed: {exc}")
+        log.warning("anomaly detector failed: %s", exc)
         return {}
 
 
@@ -153,22 +250,26 @@ def generate_alert_text(
         f"  {k}: {sensor[k]}" for k in _sensor_keys if k in sensor
     )
 
-    # ML attribution block (which sensors drove the anomaly and by how much)
+    # ML findings block (which checks drove the anomaly and why)
     ml_lines = ""
     if ml_result and ml_result.get("anomaly"):
-        attr = ml_result.get("sensor_attribution") or {}
-        top = list(attr.items())[:3]
-        attr_str = (
-            ", ".join(f"{k} ({round(v * 100)}%)" for k, v in top)
-            if top else "undetermined"
+        findings = ml_result.get("rule_findings") or []
+        finding_str = (
+            "; ".join(f"{f['label']} ({f['detail']})" for f in findings)
+            if findings else "undetermined"
         )
+        seasonal_hits = [
+            f"{sensor} z={v['zscore']:.1f}"
+            for sensor, v in (ml_result.get("seasonal") or {}).items()
+            if v.get("anomaly")
+        ]
         ml_lines = (
-            f"\nM1 IsolationForest model:\n"
-            f"  severity={ml_result.get('severity','?').upper()}  "
-            f"score={ml_result.get('score', 0):.3f}  "
-            f"trend={ml_result.get('trend', 'stable')}\n"
-            f"  primary anomaly drivers: {attr_str}\n"
+            f"\nM1 anomaly detector:\n"
+            f"  severity={ml_result.get('severity', '?').upper()}\n"
+            f"  findings: {finding_str}\n"
         )
+        if seasonal_hits:
+            ml_lines += f"  seasonal deviation: {', '.join(seasonal_hits)}\n"
 
     # Try LLM-generated alert
     try:
@@ -223,6 +324,7 @@ def generate_alert_text(
 
 _active_sessions: dict[str, str] = {}   # { user_id: container_id }
 _last_alerts:     dict[str, str] = {}   # { user_id: last alert text } — dedup
+_last_combination_alerts: dict[str, str] = {}  # { user_id: last combination-model alert key } — dedup
 
 
 def register_session(user_id: str, container_id: str) -> None:
@@ -244,41 +346,56 @@ def get_active_sessions() -> dict[str, str]:
 def run_monitor_check(push_alert_fn) -> None:
     """Check all active sessions and push alerts for any breaches.
 
-    The threshold + ML check runs synchronously (fast, < 1 s).
+    Runs the cheap rule engine (check_thresholds + anomaly_model's
+    rules.py/seasonal.py layers) -- this is the job scheduled on the
+    MONITOR_RULE_INTERVAL_SECONDS cadence (default 900s = 15min, matching
+    real MQTT message cadence; see api/main.py). The combination model (LOF)
+    is intentionally NOT run here -- it needs 24h of rolling history and is
+    scored separately by run_combination_model_check() on its own cron job.
+
+    The threshold + rule check runs synchronously (fast, < 1 s).
     The Groq LLM call is offloaded to a daemon thread so the scheduler
-    job returns immediately and never blocks the next 15-second tick.
+    job returns immediately and never blocks the next tick.
     """
     import threading
     from agent.sensors import get_sensor_reading
 
     if not _active_sessions:
-        print("[monitor] no active sessions — skipping check")
+        log.debug("no active sessions — skipping check")
         return
 
     for user_id, container_id in list(_active_sessions.items()):
         try:
             sensor    = get_sensor_reading(container_id)
-            print(f"[monitor] checking {container_id} for {user_id[:8]}...  pH={sensor.get('pH')} DO={sensor.get('DO')} temp={sensor.get('temperature')} EC={sensor.get('EC')}")
+            log.info("checking %s for %s  pH=%s DO=%s temp=%s EC=%s",
+                     container_id, user_id[:8],
+                     sensor.get("pH"), sensor.get("DO"),
+                     sensor.get("temperature"), sensor.get("EC"))
             breaches  = check_thresholds(sensor)
             ml_result = _run_ml_prediction(container_id)
 
-            ml_anomaly = ml_result.get("anomaly", False)
+            ml_anomaly      = ml_result.get("anomaly", False)
+            had_rule_breach = bool(breaches)  # before any ML-only synthesis below
             if not breaches and not ml_anomaly:
                 _last_alerts.pop(user_id, None)
                 continue
 
             if ml_anomaly and not breaches:
-                top_sensor = (
-                    max(ml_result["sensor_attribution"], key=ml_result["sensor_attribution"].get)
-                    if ml_result.get("sensor_attribution") else "sensor"
-                )
+                findings = ml_result.get("rule_findings") or []
+                if findings:
+                    top_finding = max(findings, key=lambda f: f["severity"])
+                    param       = top_finding["parameter"]
+                    label       = top_finding["label"]
+                else:
+                    param, label = "sensor", "ML anomaly"
+                sensor_key = _PARAM_TO_SENSOR_KEY.get(param, param)
                 breaches = [{
-                    "key":       top_sensor,
-                    "value":     sensor.get(top_sensor, "?"),
+                    "key":       sensor_key,
+                    "value":     sensor.get(sensor_key, "?"),
                     "threshold": None,
                     "operator":  "ml",
                     "severity":  ml_result.get("severity", "warning"),
-                    "label":     f"ML anomaly ({top_sensor})",
+                    "label":     f"ML anomaly ({label})",
                     "emoji":     _SEVERITY_EMOJI.get(ml_result.get("severity", "warning"), "⚠️"),
                 }]
 
@@ -293,9 +410,30 @@ def run_monitor_check(push_alert_fn) -> None:
                 (b["severity"] for b in breaches),
                 key=lambda s: {"harvest": 0, "warning": 1, "critical": 2}[s],
             )
+            # Same upgrade rule as generate_alert_text -- keep the severity saved/pushed
+            # here in sync with the one baked into the alert text itself.
+            if ml_result.get("severity") == "critical" and severity != "critical":
+                severity = "critical"
+
+            # Sensors actually implicated, for display (e.g. "pH, Temperature")
+            affected = list(dict.fromkeys(
+                [b["key"] for b in breaches] +
+                [_PARAM_TO_SENSOR_KEY.get(f["parameter"], f["parameter"])
+                 for f in (ml_result.get("rule_findings") or [])]
+            ))
+
+            # Who actually caught this: the agent's basic hardcoded thresholds
+            # (check_thresholds, e.g. the NTU turbidity/harvest rule), the M1
+            # anomaly detector (models/anomaly_model), or both independently.
+            if had_rule_breach and ml_anomaly:
+                source = "rule+model"
+            elif had_rule_breach:
+                source = "rule"
+            else:
+                source = "model"
 
             # Offload the slow Groq call — scheduler job returns immediately
-            def _llm_and_push(uid, cid, s, br, ml, sev):
+            def _llm_and_push(uid, cid, s, br, ml, sev, aff, src):
                 try:
                     text = generate_alert_text(cid, s, br, ml)
                     if not text:
@@ -304,17 +442,111 @@ def run_monitor_check(push_alert_fn) -> None:
                         from data.alerts import alert_store
                         alert_store.save(uid, cid, text, sev)
                     except Exception as _e:
-                        print(f"[monitor] alert DB save failed: {_e}")
-                    push_alert_fn(uid, text)
+                        log.error("alert DB save failed: %s", _e)
+                    push_alert_fn(uid, text, sev, aff, src)
                 except Exception as exc:
-                    print(f"[monitor] alert generation failed: {exc}")
+                    log.error("alert generation failed: %s", exc, exc_info=True)
 
             threading.Thread(
                 target=_llm_and_push,
-                args=(user_id, container_id, sensor, breaches, ml_result, severity),
+                args=(user_id, container_id, sensor, breaches, ml_result, severity, affected, source),
                 daemon=True,
                 name=f"alert-{container_id[:8]}",
             ).start()
 
         except Exception as exc:
-            print(f"[monitor] error checking {container_id} for {user_id}: {exc}")
+            log.error("error checking %s for %s: %s", container_id, user_id, exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Combination model (LOF) check — called by its own 24h cron job
+# ---------------------------------------------------------------------------
+
+def run_combination_model_check(push_alert_fn) -> None:
+    """Re-score the combination-anomaly model (Local Outlier Factor) once a
+    day per active session (cron job in api/main.py — see
+    models/anomaly_model/README.md: "it's a slow-moving signal").
+
+    Unlike run_monitor_check, this never evaluates the rule/seasonal layers
+    for alerting purposes (that's the 15-min job's job) — it only acts on
+    detector.evaluate()'s combination_model result.
+    """
+    import threading
+    from agent.sensors import get_sensor_reading
+
+    if not _active_sessions:
+        log.debug("no active sessions — skipping combination-model check")
+        return
+
+    for user_id, container_id in list(_active_sessions.items()):
+        try:
+            daily_context = _build_daily_context(container_id)
+            if daily_context is None:
+                log.debug("combination model: not enough 24h history yet for %s", container_id)
+                continue
+
+            sensor = get_sensor_reading(container_id)
+            if not sensor:
+                continue
+
+            detector = _get_anomaly_detector()
+            result = detector.evaluate(
+                snapshot=_to_snapshot(sensor),
+                hour_of_day=None,       # seasonal layer already covered by run_monitor_check
+                daily_context=daily_context,
+            )
+            combo = result["combination_model"]
+            if not combo or not combo["anomaly"]:
+                _last_combination_alerts.pop(user_id, None)
+                continue
+
+            breach_key = f"combination:{container_id}:{round(combo['score'], 2)}"
+            if _last_combination_alerts.get(user_id) == breach_key:
+                continue
+            _last_combination_alerts[user_id] = breach_key
+
+            breach = {
+                "key":       "combination_model",
+                "value":     round(combo["score"], 3),
+                "threshold": None,
+                "operator":  "lof",
+                "severity":  "warning",
+                "label":     "Combination anomaly (24h pattern)",
+                "emoji":     _SEVERITY_EMOJI["warning"],
+            }
+            ml_result = {
+                "anomaly":  True,
+                "severity": "warning",
+                "rule_findings": [{
+                    "parameter": "combination_model",
+                    "severity":  2,
+                    "label":     "Anomalie combinee (LOF)",
+                    "detail":    f"score={combo['score']:.3f} — inhabituel par rapport "
+                                 f"a l'historique 24h de ce site",
+                }],
+                "seasonal": {},
+            }
+
+            def _llm_and_push(uid, cid, s, br, ml):
+                try:
+                    text = generate_alert_text(cid, s, [br], ml)
+                    if not text:
+                        return
+                    try:
+                        from data.alerts import alert_store
+                        alert_store.save(uid, cid, text, "warning")
+                    except Exception as _e:
+                        log.error("alert DB save failed: %s", _e)
+                    push_alert_fn(uid, text, "warning", ["combination_model"], "model-24h")
+                except Exception as exc:
+                    log.error("combination-model alert generation failed: %s", exc, exc_info=True)
+
+            threading.Thread(
+                target=_llm_and_push,
+                args=(user_id, container_id, sensor, breach, ml_result),
+                daemon=True,
+                name=f"combo-alert-{container_id[:8]}",
+            ).start()
+
+        except Exception as exc:
+            log.error("combination-model check failed for %s/%s: %s", container_id, user_id, exc, exc_info=True)

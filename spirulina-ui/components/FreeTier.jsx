@@ -76,10 +76,10 @@ export default function FreeTier({ onUpgrade }) {
           <div style={{ fontSize: 22, marginBottom: 5 }}>🔒</div>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#5A5240", marginBottom: 4 }}>Sensor access requires Pro</div>
           <div style={{ fontSize: 11, color: "#8A8274", lineHeight: 1.55, marginBottom: 10 }}>
-            Free tier answers from the knowledge base only. Pro connects to your live MQTT sensors and 3 ML models.
+            Free tier answers from the knowledge base only. Pro connects to your live MQTT sensors and the anomaly detector.
           </div>
           <div style={{ display: "flex", gap: 5, justifyContent: "center", flexWrap: "wrap", marginBottom: 10 }}>
-            {["M1 Anomaly", "M2 Growth", "M3 Harvest", "Live MQTT", "3-day forecast"].map((f, i) => (
+            {["Anomaly Detector", "Live MQTT", "Rule + ML Alerts"].map((f, i) => (
               <span key={i} style={{ fontSize: 8.5, padding: "3px 8px", borderRadius: 20, background: "#E8E4D8", color: "#6A6252" }}>{f}</span>
             ))}
           </div>
