@@ -180,6 +180,19 @@ export async function getSensorData(containerId) {
   } catch { return null; }
 }
 
+export async function predictCPC(imageFile) {
+  const form = new FormData();
+  form.append("file", imageFile);
+  const res = await fetch(`${API_BASE}/cpc/predict`, {
+    method:  "POST",
+    headers: authHeaders(), // no Content-Type — let browser set multipart boundary
+    body:    form,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+  return data; // { cpc_mgml, unit, in_training_range, training_range }
+}
+
 // ── SSE alerts ────────────────────────────────────────────────────────────────
 
 export function connectAlerts(userId, containerId, { onAlert, onConnect, onError } = {}) {

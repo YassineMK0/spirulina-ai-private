@@ -19,6 +19,8 @@ langchain-text-splitters>=0.3.0
 rank-bm25>=0.2.2
 
 # ML / data
+opencv-python-headless>=4.10.0
+python-multipart>=0.0.12
 scikit-learn>=1.8.0
 pandas>=2.2.0
 numpy>=1.26.0

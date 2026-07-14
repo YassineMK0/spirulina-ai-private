@@ -15,6 +15,7 @@ Endpoints
     GET    /alerts/{user_id}                       -> SSE proactive alerts
     GET    /sensors/{container_id}                 -> latest sensor reading
     GET    /models/{container_id}                  -> ML model outputs
+    POST   /cpc/predict                            -> CPC concentration from image (multipart)
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ import json
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, File, HTTPException, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -87,6 +88,12 @@ def _background_warmup():
         _wlog.info("M1 anomaly detector ready")
     except Exception as e:
         _wlog.error("M1 anomaly detector warmup failed: %s", e)
+    try:
+        from models.cpc_model.predictor import CPCPredictor
+        CPCPredictor.load()
+        _wlog.info("CPC image predictor ready")
+    except Exception as e:
+        _wlog.error("CPC predictor warmup failed: %s", e)
     _wlog.info("done")
 
 
@@ -415,6 +422,32 @@ def get_model_outputs(container_id: str):
         return JSONResponse(content={"error": "no_data"}, headers={"Cache-Control": "no-store"})
 
     return JSONResponse(content={"m1": ml}, headers={"Cache-Control": "no-store"})
+
+
+# ---------------------------------------------------------------------------
+# CPC image prediction
+# ---------------------------------------------------------------------------
+
+@app.post("/cpc/predict")
+async def cpc_predict(file: UploadFile = File(...)):
+    """Predict CPC concentration (mg/mL) from a spirulina image.
+
+    Accepts any common image format (JPEG, PNG, BMP …).
+    Returns: cpc_mgml, unit, in_training_range, training_range.
+    """
+    from models.cpc_model.predictor import CPCPredictor
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    try:
+        predictor = CPCPredictor.load()
+        result = predictor.predict_bytes(image_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return JSONResponse(content=result)
 
 
 # ---------------------------------------------------------------------------
