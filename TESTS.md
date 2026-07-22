@@ -6,7 +6,7 @@
 
 **Backend (Python):**
 ```powershell
-.venv\Scripts\pytest tests/ -v
+.venv313\Scripts\pytest tests/ -v
 ```
 
 **Frontend (Next.js):**
@@ -52,6 +52,27 @@ combination model was wired into a daily cron job (`agent/monitor.py`,
 | `TestGetSince::*` | `SensorStore.get_since` filters by timestamp, returns oldest-first, and (unlike `get_latest`) doesn't drop rows with partial sensor data |
 | `TestBuildDailyContext::*` | `_build_daily_context` returns `None` with <2 readings; builds the exact 12-key feature vector with enough 24h history; normalizes EC from µS/cm to mS/cm |
 | `TestRunCombinationModelCheck::*` | No-op with no active sessions or insufficient history; pushes a `severity=warning, source=model-24h` alert when the LOF layer flags an outlier day; repeat calls with the same score are deduped |
+
+---
+
+### `test_local_llm.py` — Local Ollama LLM Wiring
+
+Live integration tests against a running Ollama server (default model
+`qwen3:8b`) for the three LLM roles that switched from Groq/OpenRouter to a
+local model on 2026-07-22 — see `MEMORY.md` / `local_llm_ollama.md`.
+**Whole file auto-skips** (not fails) if Ollama isn't reachable at
+`OLLAMA_BASE_URL` or the configured model isn't pulled, so it's safe to run
+on a machine without Ollama set up.
+
+| Test | What it tests |
+|------|--------------|
+| `TestProviderResolution::*` | Each role's `_get_llm()`/`_get_reasoning_llm()` actually builds a `ChatOllama` when its provider env var is `"ollama"`, with `reasoning=False` |
+| `TestIntentRouterAccuracy::test_classification_accuracy_at_least_70_percent` | Reuses the 30-case suite from `test_intent_router.py` against Ollama; floor is 70% (vs the ~90% Groq baseline — local 8B models classify a bit worse) |
+| `TestIntentRouterAccuracy::test_no_empty_response_from_thinking_mode` | Regression test for the exact bug hit while wiring this in: qwen3's thinking mode burned the whole token budget on `<think>` before ever emitting the JSON answer, silently returning `UNKNOWN/0.0` |
+| `TestGenerateAnswer::test_grounded_answer_no_think_leak` | `generate_answer` (KNOWLEDGE/UPDATE path) returns a real, grounded, `<think>`-free answer |
+| `TestReasoningAgent::test_agentic_tool_call_and_no_think_leak` | The ReAct tool-calling loop actually calls `get_recent_alerts` via Ollama's native tool-calling, with no `<think>` leakage into the plan panel or final response |
+| `TestReasoningGenerate::test_alert_text_no_think_leak` | `reasoning_generate` (used by `agent/monitor.py` for proactive alert text) works — regression test for `_get_reasoning_llm` previously being hardcoded to OpenRouter with no fallback |
+| `TestFullGraph::test_graph_invoke_completes_with_container` | The full compiled LangGraph pipeline completes end-to-end against Ollama (unmocked intent classification, unlike `agent/graph.py`'s own `__main__` smoke test) |
 
 ---
 
@@ -125,14 +146,19 @@ Each scenario scores 3 points: intent match (1), non-empty response (1), expecte
 
 ### `test_intent_router.py` — Intent Classification Accuracy *(existing)*
 
-30 messages across 4 intent labels run through the Groq `llama-3.1-8b-instant` classifier:
+30 messages across 4 intent labels run through whichever classifier
+`INTENT_MODEL_PROVIDER` currently points at (Groq `llama-3.1-8b-instant` by
+default before 2026-07-22; local `qwen3:8b` via Ollama since — see
+`test_local_llm.py` above, which reuses this same `TEST_CASES` list):
 
 - 8 × `KNOWLEDGE` — factual questions about spirulina biology
 - 8 × `UPDATE` — parameter change instructions
 - 7 × `HARVEST` — harvest readiness questions
 - 7 × `SYSTEM` — sensor status and device queries
 
-Reports classification accuracy %. Target: ≥ 90%.
+Reports classification accuracy %. Target: ≥ 90% (Groq baseline); measured
+~97% on qwen3:8b in practice, though `test_local_llm.py`'s own floor is a
+more conservative 70% to avoid flakiness across model updates.
 
 ---
 

@@ -2,7 +2,7 @@
 echo "[pre-commit] checking staged Python files for syntax errors..."
 STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM -- '*.py')
 if [ -n "$STAGED_PY" ]; then
-  echo "$STAGED_PY" | xargs .venv/Scripts/python.exe -m py_compile || {
+  echo "$STAGED_PY" | xargs .venv313/Scripts/python.exe -m py_compile || {
     echo "[pre-commit] Python syntax check FAILED -- fix the file(s) above before committing."
     exit 1
   }

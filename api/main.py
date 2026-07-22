@@ -13,9 +13,11 @@ Endpoints
     PATCH  /conversations/{user_id}/{conv_id}/title-> rename conversation
     GET    /health                                 -> liveness check
     GET    /alerts/{user_id}                       -> SSE proactive alerts
+    GET    /alerts/{user_id}/history               -> persisted alert history (classified)
     GET    /sensors/{container_id}                 -> latest sensor reading
     GET    /models/{container_id}                  -> ML model outputs
     POST   /cpc/predict                            -> CPC concentration from image (multipart)
+    POST   /species/predict                        -> microalgae species classification from image (multipart)
 """
 
 from __future__ import annotations
@@ -57,14 +59,16 @@ def _push_alert(
     severity: str = "warning",
     affected: list | None = None,
     source: str = "model",
+    created_at: str | None = None,
 ) -> None:
     q = _alert_queues.get(user_id)
     if q and _event_loop:
         item = {
-            "text":     alert_text,
-            "severity": _SEVERITY_DISPLAY.get(severity, "medium"),
-            "affected": affected or [],
-            "source":   source,
+            "text":       alert_text,
+            "severity":   _SEVERITY_DISPLAY.get(severity, "medium"),
+            "affected":   affected or [],
+            "source":     source,
+            "created_at": created_at,
         }
         _event_loop.call_soon_threadsafe(q.put_nowait, item)
         log.info("alert pushed  user=%s", user_id[:8])
@@ -94,6 +98,12 @@ def _background_warmup():
         _wlog.info("CPC image predictor ready")
     except Exception as e:
         _wlog.error("CPC predictor warmup failed: %s", e)
+    try:
+        from models.species_classifier.predictor import SpeciesClassifier
+        SpeciesClassifier.load()
+        _wlog.info("species classifier ready")
+    except Exception as e:
+        _wlog.error("species classifier warmup failed: %s", e)
     _wlog.info("done")
 
 
@@ -393,19 +403,11 @@ def chat(req: ChatRequest):
 @app.get("/sensors/{container_id}")
 def get_sensors(container_id: str):
     from agent.sensors import get_sensor_reading
-    from data.store import sensor_store
 
+    # get_sensor_reading() already falls back to the DB when the MQTT cache
+    # is empty -- same function the chat agent's read_sensors node uses, so
+    # the Dashboard and the chat agent never see different data.
     data = get_sensor_reading(container_id)
-    if not data:
-        rows = sensor_store.get_latest(container_id, n=1)
-        if rows:
-            r    = rows[0]
-            data = {
-                "pH": r.get("pH"), "EC": r.get("EC"), "DO": r.get("DO"),
-                "temperature": r.get("temperature"), "luminosity": r.get("luminosity"),
-                "turbidity": r.get("turbidity"), "timestamp": r.get("date"),
-                "status": "ok", "source": "db",
-            }
     return JSONResponse(content=data or {}, headers={"Cache-Control": "no-store"})
 
 
@@ -450,9 +452,48 @@ async def cpc_predict(file: UploadFile = File(...)):
     return JSONResponse(content=result)
 
 
+@app.post("/species/predict")
+async def species_predict(file: UploadFile = File(...)):
+    """Classify a microalgae image as Chlamydomonas_Reinhardtii,
+    Chlorella_FSP, or Spirulina_Platensis -- a non-Spirulina_Platensis
+    result is a contamination signal.
+
+    Accepts any common image format (JPEG, PNG, BMP …).
+    Returns: species, confidence, probabilities, is_target_species, warning.
+    """
+    from models.species_classifier.predictor import SpeciesClassifier
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    try:
+        predictor = SpeciesClassifier.load()
+        result = predictor.predict_bytes(image_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return JSONResponse(content=result)
+
+
 # ---------------------------------------------------------------------------
 # SSE alerts
 # ---------------------------------------------------------------------------
+
+@app.get("/alerts/{user_id}/history")
+def alert_history(user_id: str, limit: int = 50):
+    """Persisted alert history for a user, newest first -- classified by
+    severity/source/affected sensors (see data/alerts.py). Used to hydrate
+    the Alerts page on load so a refresh doesn't lose everything that only
+    arrived over the live SSE stream previously."""
+    from data.alerts import alert_store
+    rows = alert_store.get_recent_for_user(user_id, limit)
+    # DB rows store monitor.py's severity vocabulary (critical/warning/harvest);
+    # translate to the frontend vocabulary so history rows match live SSE ones.
+    for r in rows:
+        r["severity"] = _SEVERITY_DISPLAY.get(r.get("severity"), "medium")
+    return rows
+
 
 @app.get("/alerts/{user_id}")
 async def alerts_sse(user_id: str, container_id: str = ""):

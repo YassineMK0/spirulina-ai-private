@@ -28,8 +28,24 @@ self.addEventListener("fetch", (event) => {
   const { request } = event;
   const url = new URL(request.url);
 
-  // Never intercept API calls or SSE — always go network-only
-  if (url.pathname.startsWith("/api/") || url.pathname.startsWith("/chat") || url.pathname.startsWith("/alerts")) {
+  // Never intercept the backend API — always go network-only. The backend
+  // is a different origin than this app (NEXT_PUBLIC_API_URL), so this must
+  // be origin-based, not just a same-origin path prefix: a path-only check
+  // (e.g. "/sensors/") would never even match a cross-origin request here,
+  // but would also silently miss same-origin API paths if the app is ever
+  // reverse-proxied onto this origin. Checking both covers either setup.
+  if (
+    url.origin !== self.location.origin ||
+    url.pathname.startsWith("/api/") ||
+    url.pathname.startsWith("/chat") ||
+    url.pathname.startsWith("/alerts") ||
+    url.pathname.startsWith("/sensors") ||
+    url.pathname.startsWith("/models") ||
+    url.pathname.startsWith("/conversations") ||
+    url.pathname.startsWith("/cpc") ||
+    url.pathname.startsWith("/auth") ||
+    url.pathname.startsWith("/admin")
+  ) {
     return;
   }
 

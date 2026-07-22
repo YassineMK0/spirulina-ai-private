@@ -132,15 +132,42 @@ def start_mqtt_subscriber() -> None:
 # ---------------------------------------------------------------------------
 
 def get_sensor_reading(container_id: str) -> dict[str, Any]:
-    """Return latest cached MQTT reading for a container.
+    """Return the latest reading for a container -- live MQTT cache first,
+    falling back to the last persisted DB row if no live reading has
+    arrived yet (e.g. no MQTT broker connected in this environment).
 
-    Returns empty dict if no reading has been received yet.
+    Single source of truth for "what's the current reading" -- used by both
+    GET /sensors/{container_id} (the Dashboard) and the chat agent's
+    read_sensors node. They must not diverge: previously only the API route
+    had the DB fallback inlined, so the Dashboard could show a real reading
+    while the chat agent saw an empty {} for the same container and had no
+    way to answer "what's my pH right now".
+
+    Returns empty dict if there is truly no reading anywhere.
     Callers should treat empty dict as 'no data' rather than an error.
     """
     if not container_id:
         return {}
     with _lock:
-        return dict(_cache.get(container_id, {}))
+        live = dict(_cache.get(container_id, {}))
+    if live:
+        return live
+
+    try:
+        from data.store import sensor_store
+        rows = sensor_store.get_latest(container_id, n=1)
+    except Exception:
+        return {}
+    if not rows:
+        return {}
+
+    r = rows[0]
+    return {
+        "pH": r.get("pH"), "EC": r.get("EC"), "DO": r.get("DO"),
+        "temperature": r.get("temperature"), "luminosity": r.get("luminosity"),
+        "turbidity": r.get("turbidity"), "timestamp": r.get("date"),
+        "status": "ok", "source": "db",
+    }
 
 
 def get_history(container_id: str, n: int = 7) -> list[dict]:
@@ -224,37 +251,35 @@ if __name__ == "__main__":
         "temperature": 36.0, "luminosity": 12000.0, "turbidity": 200.0,
     }
 
-    # Two independent severity layers fire on every reading:
-    #   rule   = agent.monitor.check_thresholds (hardcoded, basic, "harvest" tier exists)
-    #   M1     = models/anomaly_model rules.py (pH<8.5/>11.5, EC<10/>30 mS/cm, temp<20/>41,
-    #            DO<4.0 daytime; EC auto-converted uS/cm->mS/cm by agent.monitor._to_snapshot)
-    # M1 has NO low-EC rule via the basic threshold layer and rule has no equivalent
-    # for EC<10mS/cm dilution -- ec_dilution below only fires through M1, which is
-    # exactly the case that was silently broken before the Turbidite KeyError fix
-    # earlier this session (M1 raised on every call and was swallowed silently).
-    # Turbidite/OD680 has no calibration from the NTU turbidity sensor, so it's never
-    # sent to M1 -- the "harvest" scenario below only exercises the rule layer.
-    # When both layers disagree, run_monitor_check/generate_alert_text upgrade to
-    # the higher severity -- see "upgraded" notes below.
+    # check_thresholds (agent.monitor, the fast 15-min loop) now delegates
+    # pH/EC/Temperature/DO/Luminosite directly to models/anomaly_model/rules.py
+    # -- the same expert table _run_ml_prediction's M1 detector uses -- so the
+    # two used to disagree (different hardcoded numbers) and are now unified:
+    # a rule-table finding is caught by both at once, reported as source
+    # "rule+model". Two things still only go through one path each because
+    # rules.py has no equivalent: turbidity/harvest (source "rule" only --
+    # agent's NTU turbidity sensor has no OD680 calibration for rules.py's
+    # Turbidite check) and pure seasonal drift (source "model" only -- a
+    # Temperature/Luminosite z-score anomaly with no rule threshold crossed).
     _SCENARIOS = {
         "ph_crash":    {"overrides": {"pH": 7.0},
-                        "expect": "rule=critical (pH<7.5) | M1=critical (pH<8.5)"},
+                        "expect": "critical (pH<8.5) -- source=rule+model"},
         "ph_high":     {"overrides": {"pH": 12.0},
-                        "expect": "rule=warning (pH>10.8) | M1=critical (pH>11.5) -> upgraded to critical"},
+                        "expect": "critical (pH>11.5) -- source=rule+model"},
         "temp_hot":    {"overrides": {"temperature": 43.0},
-                        "expect": "rule=warning (temp>39) | M1=critical (temp>41) -> upgraded to critical"},
+                        "expect": "critical (temp>41) -- source=rule+model"},
         "temp_cold":   {"overrides": {"temperature": 15.0},
-                        "expect": "rule=warning (temp<20) | M1=critical (temp<20) -> upgraded to critical"},
+                        "expect": "critical (temp<20) -- source=rule+model"},
         "harvest":     {"overrides": {"turbidity": 820.0},
-                        "expect": "rule=harvest tier (turbidity>300 NTU) | M1=not evaluated (no OD680 calibration)"},
+                        "expect": "harvest tier (turbidity>300 NTU) -- source=rule (no OD680 calibration, M1 not evaluated)"},
         "ec_dilution": {"overrides": {"EC": 5000.0},
-                        "expect": "rule=no match (no low-EC rule) | M1=critical (5 mS/cm < 10) -- M1-only catch"},
+                        "expect": "critical (5 mS/cm < 10) -- source=rule+model (was M1-only before rule/M1 unification)"},
         "ec_high":     {"overrides": {"EC": 35000.0},
-                        "expect": "rule=warning (EC>30000uS/cm) | M1=critical (35 mS/cm > 30) -> upgraded to critical"},
+                        "expect": "critical (35 mS/cm > 30) -- source=rule+model"},
         "do_low":      {"overrides": {"DO": 2.0},
-                        "expect": "rule=warning (DO<4) | M1=critical (DO<4, daytime) -> upgraded to critical"},
+                        "expect": "critical (DO<4, daytime) -- source=rule+model"},
         "multi":       {"overrides": {"pH": 7.0, "DO": 2.0, "temperature": 43.0},
-                        "expect": "3 simultaneous critical findings (pH, DO, temperature) on both layers"},
+                        "expect": "3 simultaneous critical findings (pH, DO, temperature) -- source=rule+model"},
     }
 
     parser = argparse.ArgumentParser(description="Spirulina MQTT crash simulator")

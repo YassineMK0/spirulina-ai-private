@@ -97,12 +97,12 @@ def run_tests() -> None:
         sample = retrieve("spirulina", top_k=1)
     except Exception as exc:
         print(f"ERROR: Could not connect to ChromaDB: {exc}")
-        print("Run the ingest script first:  .venv/Scripts/python -m rag.embedder.ingest")
+        print("Run the ingest script first:  .venv313/Scripts/python -m rag.embedder.ingest")
         sys.exit(1)
 
     if not sample:
         print("Collection is empty — run ingest first.")
-        print("  .venv/Scripts/python -m rag.embedder.ingest")
+        print("  .venv313/Scripts/python -m rag.embedder.ingest")
         sys.exit(0)
 
     passed = 0

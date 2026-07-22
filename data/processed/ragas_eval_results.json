@@ -1,0 +1,142 @@
+{
+  "overall": {
+    "faithfulness": NaN,
+    "context_recall": 0.683
+  },
+  "by_category": {
+    "factual": {
+      "faithfulness": NaN,
+      "context_recall": 0.595
+    },
+    "troubleshooting": {
+      "faithfulness": NaN,
+      "context_recall": 0.81
+    },
+    "operational": {
+      "faithfulness": NaN,
+      "context_recall": 0.639
+    }
+  },
+  "per_question": [
+    {
+      "user_input": "What is the optimal pH range for spirulina cultivation?",
+      "category": "factual",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "What temperature range does spirulina grow best in?",
+      "category": "factual",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "What does OD680 measure in a spirulina culture?",
+      "category": "factual",
+      "faithfulness": NaN,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "What is the protein content of spirulina?",
+      "category": "factual",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "What light intensity is recommended for spirulina growth?",
+      "category": "factual",
+      "faithfulness": NaN,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "What is EC conductivity and why does it matter for spirulina?",
+      "category": "factual",
+      "faithfulness": NaN,
+      "context_recall": 0.6666666666666666
+    },
+    {
+      "user_input": "What nutrients does spirulina need to grow?",
+      "category": "factual",
+      "faithfulness": NaN,
+      "context_recall": 0.5
+    },
+    {
+      "user_input": "My spirulina culture is turning yellow. What is wrong?",
+      "category": "troubleshooting",
+      "faithfulness": NaN,
+      "context_recall": 0.6666666666666666
+    },
+    {
+      "user_input": "The pH in my culture dropped to 7.2. What should I do?",
+      "category": "troubleshooting",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "There is white foam on the surface of my culture. Is this normal?",
+      "category": "troubleshooting",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "My culture has a bad smell. What could be causing this?",
+      "category": "troubleshooting",
+      "faithfulness": NaN,
+      "context_recall": 0.6666666666666666
+    },
+    {
+      "user_input": "My conductivity is 38 mS/cm. Is this a problem?",
+      "category": "troubleshooting",
+      "faithfulness": NaN,
+      "context_recall": 0.6666666666666666
+    },
+    {
+      "user_input": "Growth has slowed significantly after two weeks. What should I check?",
+      "category": "troubleshooting",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "I see green patches in my spirulina culture. What are they?",
+      "category": "troubleshooting",
+      "faithfulness": NaN,
+      "context_recall": 0.6666666666666666
+    },
+    {
+      "user_input": "When should I harvest my spirulina?",
+      "category": "operational",
+      "faithfulness": NaN,
+      "context_recall": 0.0
+    },
+    {
+      "user_input": "How do I do a partial harvest?",
+      "category": "operational",
+      "faithfulness": NaN,
+      "context_recall": 0.3333333333333333
+    },
+    {
+      "user_input": "How often should I stir or agitate my spirulina culture?",
+      "category": "operational",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "How do I dry harvested spirulina?",
+      "category": "operational",
+      "faithfulness": NaN,
+      "context_recall": 0.5
+    },
+    {
+      "user_input": "How do I refill my container after harvesting?",
+      "category": "operational",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    },
+    {
+      "user_input": "Quelle est la temperature optimale pour la spiruline?",
+      "category": "operational",
+      "faithfulness": NaN,
+      "context_recall": 1.0
+    }
+  ]
+}

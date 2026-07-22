@@ -2,7 +2,7 @@
 import { useState, useEffect, useRef } from "react";
 import { C } from "@/lib/theme";
 import { Tag, Label, Dot } from "@/components/atoms";
-import { getModelOutputs, predictCPC } from "@/lib/api";
+import { getModelOutputs, predictCPC, predictSpecies } from "@/lib/api";
 
 
 const LiveRow = ({ k, v, color }) => (
@@ -241,6 +241,227 @@ function CPCPredictorCard() {
 }
 
 
+/* ── Species Classifier card ──────────────────────────────────────────────── */
+function SpeciesClassifierCard() {
+  const [file,     setFile]     = useState(null);
+  const [preview,  setPreview]  = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [result,   setResult]   = useState(null);
+  const [error,    setError]    = useState(null);
+  const [dragging, setDragging] = useState(false);
+  const inputRef = useRef(null);
+
+  const handleFile = (f) => {
+    if (!f || !f.type.startsWith("image/")) return;
+    if (preview) URL.revokeObjectURL(preview);
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+    setResult(null);
+    setError(null);
+  };
+
+  const clear = () => {
+    if (preview) URL.revokeObjectURL(preview);
+    setFile(null);
+    setPreview(null);
+    setResult(null);
+    setError(null);
+  };
+
+  const handlePredict = async () => {
+    if (!file || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await predictSpecies(file);
+      setResult(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const resultColor = result ? (result.is_target_species ? C.green : C.red) : C.text3;
+  const resultTag   = result ? (result.is_target_species ? "TARGET SPECIES" : "CONTAMINATION") : null;
+
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden" }}>
+
+      {/* Header */}
+      <div style={{ padding: "13px 15px", display: "flex", alignItems: "center", gap: 11, borderBottom: `1px solid ${C.border}` }}>
+        <div style={{
+          width: 34, height: 34, borderRadius: 8,
+          background: C.greenSoft,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 9, fontWeight: 800, fontFamily: C.mono, color: C.green, flexShrink: 0,
+          letterSpacing: 0.5,
+        }}>SPC</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>Species Classifier</div>
+          <div style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono, marginTop: 1 }}>
+            Contamination check · shape/texture features + XGBoost · ~97% test accuracy
+          </div>
+        </div>
+        {resultTag && <Tag color={resultColor}>{resultTag}</Tag>}
+      </div>
+
+      {/* Body */}
+      <div style={{ padding: "13px 15px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+
+        {/* Left: drop zone */}
+        <div>
+          <Label>MICROSCOPE IMAGE</Label>
+          <div
+            onClick={() => inputRef.current?.click()}
+            onDragOver={(e)  => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={()  => setDragging(false)}
+            onDrop={(e) => { e.preventDefault(); setDragging(false); handleFile(e.dataTransfer.files[0]); }}
+            style={{
+              border:       `1.5px dashed ${dragging ? C.green : preview ? C.border2 : C.border}`,
+              borderRadius: 8,
+              background:   dragging ? C.greenAlpha8 : C.card2,
+              cursor:       "pointer",
+              display:      "flex",
+              alignItems:   "center",
+              justifyContent: "center",
+              flexDirection: "column",
+              gap:          6,
+              minHeight:    110,
+              overflow:     "hidden",
+              transition:   "border-color 0.15s, background 0.15s",
+              padding:      preview ? 0 : "18px 10px",
+            }}
+          >
+            {preview ? (
+              <img
+                src={preview}
+                alt="preview"
+                style={{ width: "100%", height: 110, objectFit: "cover", display: "block" }}
+              />
+            ) : (
+              <>
+                <span style={{ fontSize: 22, opacity: 0.7 }}>&#128300;</span>
+                <span style={{ fontSize: 9, color: C.text3, fontFamily: C.mono, textAlign: "center" }}>
+                  Drop image or click to browse
+                </span>
+                <span style={{ fontSize: 8, color: C.text3, fontFamily: C.mono }}>JPEG · PNG · BMP</span>
+              </>
+            )}
+          </div>
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => handleFile(e.target.files[0])}
+          />
+          {preview && (
+            <div
+              onClick={() => inputRef.current?.click()}
+              style={{ fontSize: 9, color: C.text3, fontFamily: C.mono, marginTop: 4, cursor: "pointer",
+                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            >
+              {file?.name} — click to change
+            </div>
+          )}
+        </div>
+
+        {/* Right: result */}
+        <div>
+          <Label>PREDICTION</Label>
+          <div style={{
+            background: C.card2, border: `1px solid ${C.border2}`,
+            borderRadius: 7, padding: "10px 12px", minHeight: 110,
+            display: "flex", flexDirection: "column", justifyContent: "center",
+          }}>
+            {loading ? (
+              <div style={{ color: C.text3, fontFamily: C.mono, fontSize: 9 }}>Running model…</div>
+            ) : error ? (
+              <div style={{ color: C.red, fontFamily: C.mono, fontSize: 9, wordBreak: "break-word" }}>{error}</div>
+            ) : result ? (
+              <>
+                <div style={{ fontSize: 16, fontWeight: 800, fontFamily: C.mono, color: resultColor, lineHeight: 1.3 }}>
+                  {result.species.replace(/_/g, " ")}
+                </div>
+                <div style={{ fontSize: 9.5, color: C.text2, fontFamily: C.mono, marginTop: 3 }}>
+                  confidence: {(result.confidence * 100).toFixed(1)}%
+                </div>
+                {result.warning && (
+                  <div style={{
+                    fontSize: 8.5, marginTop: 8, padding: "5px 8px", borderRadius: 5,
+                    background: C.redSoft, border: "1px solid #4A1010", color: C.red, fontFamily: C.mono,
+                  }}>
+                    ⚠ {result.warning}
+                  </div>
+                )}
+                <div style={{ marginTop: 9, display: "flex", flexDirection: "column", gap: 3 }}>
+                  {Object.entries(result.probabilities)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([cls, p]) => (
+                      <div key={cls} style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ fontSize: 8, color: C.text3, fontFamily: C.mono }}>{cls.replace(/_/g, " ")}</span>
+                        <span style={{ fontSize: 8, color: C.text2, fontFamily: C.mono }}>{(p * 100).toFixed(1)}%</span>
+                      </div>
+                    ))}
+                </div>
+              </>
+            ) : (
+              <div style={{ color: C.text3, fontFamily: C.mono, fontSize: 9 }}>
+                Upload a microalgae image and click Predict
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Footer: predict + clear buttons */}
+      <div style={{
+        padding: "10px 15px", borderTop: `1px solid ${C.border}`,
+        display: "flex", alignItems: "center", gap: 8,
+      }}>
+        <button
+          disabled={!file || loading}
+          onClick={handlePredict}
+          style={{
+            padding:    "7px 18px",
+            borderRadius: 7,
+            background: file && !loading ? C.green : C.card2,
+            color:      file && !loading ? "#000"  : C.text3,
+            border:     "none",
+            fontFamily: C.mono,
+            fontSize:   10.5,
+            fontWeight: 700,
+            cursor:     file && !loading ? "pointer" : "not-allowed",
+            transition: "background 0.15s, color 0.15s",
+          }}
+        >
+          {loading ? "Predicting…" : "Predict Species"}
+        </button>
+
+        {(result || preview) && !loading && (
+          <button
+            onClick={clear}
+            style={{
+              padding: "7px 12px", borderRadius: 7,
+              background: "none", color: C.text3,
+              border: `1px solid ${C.border}`,
+              fontFamily: C.mono, fontSize: 10, cursor: "pointer",
+            }}
+          >
+            Clear
+          </button>
+        )}
+
+        <span style={{ fontSize: 8.5, color: C.text3, fontFamily: C.mono, marginLeft: "auto" }}>
+          Chlamydomonas · Chlorella · Spirulina
+        </span>
+      </div>
+    </div>
+  );
+}
+
+
 /* ── Page ─────────────────────────────────────────────────────────────────── */
 export default function ModelsPage({ containerId }) {
   const [outputs, setOutputs] = useState(null);
@@ -322,6 +543,9 @@ export default function ModelsPage({ containerId }) {
 
       {/* CPC Image Predictor */}
       <CPCPredictorCard />
+
+      {/* Species Classifier */}
+      <SpeciesClassifierCard />
 
     </div>
   );

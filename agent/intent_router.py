@@ -100,14 +100,18 @@ def _get_llm():
             max_tokens=40,
         )
 
-    # -- local / ollama Mistral-7B -----------------------------------------
+    # -- local / Ollama ------------------------------------------------------
     if provider == "ollama":
-        from langchain_community.chat_models import ChatOllama
+        from langchain_ollama import ChatOllama
 
         return ChatOllama(
-            model=os.getenv("INTENT_MODEL_NAME", "mistral"),
+            model=os.getenv("INTENT_MODEL_NAME", "qwen3:8b"),
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             temperature=0,
-            num_predict=40,
+            num_predict=200,
+            reasoning=False,  # qwen3 thinking mode would burn the whole
+                               # token budget on <think> before ever
+                               # emitting the JSON this classifier needs
         )
 
     raise ValueError(f"Unsupported INTENT_MODEL_PROVIDER: {provider}")

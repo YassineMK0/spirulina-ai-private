@@ -3,9 +3,10 @@ import { C } from "@/lib/theme";
 import { Tag } from "@/components/atoms";
 
 const SOURCE_LABEL = {
-  rule:        "Threshold Rule",
-  model:       "M1 Model",
+  rule:         "Threshold Rule",
+  model:        "M1 Model",
   "rule+model": "Rule + Model",
+  "model-24h":  "24h Pattern Check (LOF)",
 };
 
 export default function AlertsPage({ alerts = [], onGoChat }) {

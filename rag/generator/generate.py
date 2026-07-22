@@ -36,6 +36,10 @@ from langchain_core.prompts import ChatPromptTemplate
 
 GENERATOR_PROVIDER  = os.getenv("GENERATOR_MODEL_PROVIDER", "groq")
 GENERATOR_MODEL     = os.getenv("GENERATOR_MODEL_NAME",     "llama-3.3-70b-versatile")
+# Defaults to GENERATOR_MODEL_PROVIDER so one knob switches everything at
+# once; set REASONING_MODEL_PROVIDER explicitly to use a different provider
+# just for reasoning (e.g. keep Groq for chat, OpenRouter for reasoning).
+REASONING_PROVIDER  = os.getenv("REASONING_MODEL_PROVIDER", GENERATOR_PROVIDER)
 REASONING_MODEL     = os.getenv("REASONING_MODEL_NAME",     "nvidia/nemotron-3-super-120b-a12b:free")
 OPENROUTER_API_KEY  = os.getenv("OPENROUTER_API_KEY", "")
 HISTORY_WINDOW      = 6   # number of recent messages included in context
@@ -244,6 +248,15 @@ def _get_llm():
             kwargs["api_key"] = OPENROUTER_API_KEY
             kwargs["base_url"] = "https://openrouter.ai/api/v1"
         return ChatOpenAI(**kwargs)
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model=os.getenv("GENERATOR_MODEL_NAME", "qwen3:8b"),
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            temperature=0.2,
+            num_predict=1024,
+            reasoning=False,  # generate_answer doesn't strip <think> tags
+        )
     if provider == "huggingface":
         from langchain_huggingface import HuggingFaceEndpoint
         return HuggingFaceEndpoint(
@@ -343,28 +356,15 @@ _REASONING_SYSTEM_PROMPT = """\
 You are SpirulinaAI — a spirulina cultivation expert giving actionable advice \
 to a container owner who may not have a scientific background.
 
-You receive sensor readings, ML model outputs, and a question. \
-Your job is to give a structured markdown response the owner can act on \
-immediately — with a clear plan visible at the top.
-
-## Output format — always use this structure
-
-### Situation
-What is happening with the culture right now (1–2 sentences, plain language).
-
-### Analysis
-What the sensor data and ML outputs reveal — reference specific values \
-using `code` formatting (e.g. `pH 9.8`, `EC 2.1 mS/cm`). Keep to 2–3 key findings.
-
-### Action Steps
-Concrete numbered steps to take today, in priority order. \
-Simple language — no formulas, no equations. 3–5 steps maximum.
-
-### If nothing is done
-What will happen to the culture within the next 24–48 h (1 sentence).
+You receive sensor readings, ML model outputs, and a question. Answer as you \
+would actually talk to the owner — clear markdown, no mandatory section \
+skeleton. If the question (in the human message below) already specifies its \
+own answer format, follow that format exactly instead of inventing your own \
+structure — don't wrap it in extra headers it didn't ask for.
 
 ## Rules
 - Use **bold** for critical values and urgent actions
+- Reference specific values with `code` formatting (e.g. `pH 9.8`, `EC 2.1 mS/cm`)
 - Never give exact chemical doses without current sensor values being available
 - If critical (status=error, multiple anomalies, OD dropping fast), say so clearly \
   and recommend contacting a specialist immediately
@@ -403,15 +403,38 @@ _REASONING_PROMPT = ChatPromptTemplate.from_messages([
 
 @lru_cache(maxsize=1)
 def _get_reasoning_llm():
-    """Return the reasoning LLM singleton (OpenRouter — nemotron/R1-class model)."""
-    from langchain_openai import ChatOpenAI
-    return ChatOpenAI(
-        model=REASONING_MODEL,
-        api_key=OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1",
-        temperature=0.1,   # low temp — consistent reasoning
-        max_tokens=2048,   # R1 needs room for chain-of-thought
-    )
+    """Return the reasoning LLM singleton (Groq / OpenAI / OpenRouter / Ollama).
+
+    Was hardcoded to OpenRouter with no fallback -- if OPENROUTER_API_KEY
+    wasn't set, every call raised and reasoning_generate() (used by
+    agent.monitor.generate_alert_text for proactive alerts) silently fell
+    through to its bare-template exception handler. Now follows the same
+    provider branching as _get_llm() above.
+    """
+    provider = REASONING_PROVIDER.lower()
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+        return ChatGroq(
+            model=os.getenv("REASONING_MODEL_NAME", "llama-3.3-70b-versatile"),
+            temperature=0.1,
+            max_tokens=2048,
+        )
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model=os.getenv("REASONING_MODEL_NAME", "qwen3:8b"),
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            temperature=0.1,
+            num_predict=2048,
+        )
+    if provider in ("openai", "openrouter"):
+        from langchain_openai import ChatOpenAI
+        kwargs = {"model": REASONING_MODEL, "temperature": 0.1, "max_tokens": 2048}
+        if provider == "openrouter":
+            kwargs["api_key"] = OPENROUTER_API_KEY
+            kwargs["base_url"] = "https://openrouter.ai/api/v1"
+        return ChatOpenAI(**kwargs)
+    raise ValueError(f"Unknown REASONING_MODEL_PROVIDER: {provider!r}")
 
 
 @lru_cache(maxsize=1)
@@ -468,7 +491,7 @@ def generate_answer(
             "sensor_block": _format_sensor_block(sensor_state or {}),
             "ml_block":     _format_ml_block(ml_outputs or {}),
         })
-        return answer.strip()
+        return _strip_think_tags(answer)
     except Exception as exc:
         return (
             f"I encountered an error while generating the answer: {exc}. "

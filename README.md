@@ -144,7 +144,7 @@ requirements.txt
 
 ```bash
 # 1. Create virtualenv
-python -m venv .venv && .venv\Scripts\activate
+python -m venv .venv313 && .venv313\Scripts\activate
 
 # 2. Install dependencies
 pip install -r requirements.txt
@@ -157,7 +157,7 @@ copy .env.template .env
 python -m rag.embedder.ingest
 
 # 5. Start the server
-.venv\Scripts\uvicorn api.main:app --port 8000
+.venv313\Scripts\uvicorn api.main:app --port 8000
 
 # 6. Open chat.html in your browser
 ```
@@ -203,13 +203,13 @@ Use these as container ID in the chat UI to test the reasoning agent and alerts:
 
 ```bash
 # 50 conversation scenarios
-.venv\Scripts\python -m tests.test_conversations
+.venv313\Scripts\python -m tests.test_conversations
 
 # Edge case tests (no API key needed — fully mocked)
-.venv\Scripts\python -m tests.test_edge_cases
+.venv313\Scripts\python -m tests.test_edge_cases
 
 # Intent router accuracy
-.venv\Scripts\python -m tests.test_intent_router
+.venv313\Scripts\python -m tests.test_intent_router
 ```
 
 ---

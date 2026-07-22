@@ -1,7 +1,15 @@
 """RAGAS evaluation for SpirulinaAI RAG pipeline.
 
 Evaluates 20 questions (factual, troubleshooting, operational) using the
-official RAGAS library with Groq as the judge LLM.
+official RAGAS library. The generator itself is whatever GENERATOR_MODEL_PROVIDER
+is set to in .env (local qwen3:8b via Ollama by default as of 2026-07-22 --
+see MEMORY.md / local_llm_ollama.md). The judge LLM is separately
+selectable via --judge-provider/--judge-model, defaulting to the local
+Ollama model too -- Groq's llama-3.3-70b-versatile (100k tokens/day) is
+easily exhausted by normal app usage and was hardcoded here with no
+fallback, which is exactly what broke a run of this eval on 2026-07-22
+(every judge call hit a 429 rate limit that had nothing to do with this
+script; the generation side worked fine).
 
 Metrics:
     faithfulness      - is the answer grounded in the retrieved context?
@@ -9,8 +17,9 @@ Metrics:
     context_recall    - does the context cover the ground truth?
 
 Run:
-    .venv\\Scripts\\python -m tests.ragas_eval
-    .venv\\Scripts\\python -m tests.ragas_eval --save
+    .venv313\\Scripts\\python -m tests.ragas_eval
+    .venv313\\Scripts\\python -m tests.ragas_eval --save
+    .venv313\\Scripts\\python -m tests.ragas_eval --judge-provider groq --judge-model llama-3.1-8b-instant
 """
 
 from __future__ import annotations
@@ -185,26 +194,57 @@ def build_dataset():
 # Run RAGAS evaluation
 # ---------------------------------------------------------------------------
 
-def run_eval(dataset, save: bool = False):
+def _build_judge_llm(provider: str, model: str):
+    """RAGAS judge LLM, provider-selectable so this doesn't hard-depend on
+    Groq's shared daily quota (llama-3.3-70b-versatile is 100k tokens/day
+    and gets exhausted fast by normal app usage -- see MEMORY.md). Defaults
+    to the local Ollama model since the app itself no longer calls Groq."""
+    if provider == "ollama":
+        from langchain_ollama import ChatOllama
+        return ChatOllama(
+            model=model,
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            temperature=0,
+            reasoning=False,  # RAGAS expects structured extraction output,
+                              # not a <think> preamble eating the budget
+        )
+    if provider == "groq":
+        from langchain_groq import ChatGroq
+        return ChatGroq(model=model, temperature=0)
+    raise ValueError(f"Unsupported judge provider: {provider!r}")
+
+
+def run_eval(dataset, save: bool = False, judge_provider: str = "ollama", judge_model: str | None = None):
     from ragas import evaluate
     from ragas.metrics._faithfulness import faithfulness
     from ragas.metrics._context_recall import context_recall
     from ragas.llms import LangchainLLMWrapper
-    from langchain_groq import ChatGroq
 
-    print("\nConfiguring RAGAS judge (Groq llama-3.3-70b-versatile)...")
+    judge_model = judge_model or ("qwen3:8b" if judge_provider == "ollama" else "llama-3.1-8b-instant")
+    print(f"\nConfiguring RAGAS judge ({judge_provider} {judge_model})...")
 
-    judge_llm = LangchainLLMWrapper(ChatGroq(
-        model="llama-3.3-70b-versatile",
-        temperature=0,
-    ))
+    judge_llm = LangchainLLMWrapper(_build_judge_llm(judge_provider, judge_model))
     faithfulness.llm = judge_llm
     context_recall.llm = judge_llm
 
     metrics = [faithfulness, context_recall]
 
+    run_config = None
+    if judge_provider == "ollama":
+        # RAGAS defaults to max_workers=16 concurrent judge calls -- fine
+        # against a cloud API, but a local Ollama server processes one
+        # request at a time, so 16-way concurrency just means most jobs
+        # queue behind the others and blow past the 180s default timeout
+        # (this is exactly what turned every faithfulness score into `nan`
+        # on 2026-07-22: it needs 2 judge calls per sample -- claim
+        # decomposition, then verification -- so it's the most queue-
+        # sensitive metric). Serialize instead, with a longer timeout per
+        # call to match local-model latency.
+        from ragas.run_config import RunConfig
+        run_config = RunConfig(timeout=300, max_workers=2)
+
     print("Running RAGAS evaluation...")
-    results = evaluate(dataset=dataset, metrics=metrics)
+    results = evaluate(dataset=dataset, metrics=metrics, run_config=run_config)
 
     df = results.to_pandas()
 
@@ -262,7 +302,11 @@ def run_eval(dataset, save: bool = False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save", action="store_true", help="Save results to JSON")
+    parser.add_argument("--judge-provider", default="ollama", choices=["ollama", "groq"],
+                         help="RAGAS judge LLM provider (default: ollama, avoids Groq's shared daily quota)")
+    parser.add_argument("--judge-model", default=None,
+                         help="Judge model name (default: qwen3:8b for ollama, llama-3.1-8b-instant for groq)")
     args = parser.parse_args()
 
     dataset, _ = build_dataset()
-    run_eval(dataset, save=args.save)
+    run_eval(dataset, save=args.save, judge_provider=args.judge_provider, judge_model=args.judge_model)

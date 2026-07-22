@@ -17,7 +17,7 @@ if [ -f "$CACHE_FILE" ]; then
 fi
 
 echo "[pre-push] running full backend test suite (pytest)..."
-.venv/Scripts/python.exe -m pytest tests/ \
+.venv313/Scripts/python.exe -m pytest tests/ \
   --ignore=tests/test_conversations.py \
   --ignore=tests/test_intent_router.py \
   --ignore=tests/test_retrieval.py \

@@ -336,31 +336,24 @@ def format_action_plan(
     actions: list,
     check_after_hours: int = 24,
 ) -> str:
-    """Format the agent's final recommendations as a prioritised markdown checklist.
-
-    Call this as the LAST step after all calculations and diagnosis are complete.
+    """Organise concrete recommendations into a short ordered list you can
+    weave into your own response prose. Optional — only call this when there
+    are genuinely multiple concrete actions to sequence; skip it for a
+    one-off answer or a single recommendation.
 
     Args:
         situation_summary: One sentence describing the current situation
         actions: Concrete action strings in priority order (3–5 max)
-        check_after_hours: When to re-evaluate (hours from now)
+        check_after_hours: When it's worth re-checking (hours from now)
     """
     if not actions:
-        return f"**No actions required.** Situation: {situation_summary}"
+        return f"No actions required. Situation: {situation_summary}"
 
-    steps_md = "\n".join(f"- [ ] **Step {i+1}:** {a}" for i, a in enumerate(actions[:5]))
-
-    return f"""## Action Plan
-
-> **Situation:** {situation_summary}
-
-### Steps — execute in order
-{steps_md}
-
-### Follow-up
-Re-measure sensors in **{check_after_hours} h** and confirm the culture has stabilised.
-If readings have not improved, escalate to a cultivation specialist.
-"""
+    steps = "\n".join(f"{i+1}. {a}" for i, a in enumerate(actions[:5]))
+    return (
+        f"Situation: {situation_summary}\n\n{steps}\n\n"
+        f"(worth re-checking in ~{check_after_hours}h if you reference a follow-up)"
+    )
 
 
 # ── Alert History ─────────────────────────────────────────────────────────────

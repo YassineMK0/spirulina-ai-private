@@ -67,11 +67,19 @@ def _make_state(message: str) -> AgentState:
 
 
 def main() -> None:
+    provider = os.getenv("INTENT_MODEL_PROVIDER", "groq").lower()
     groq_key = os.getenv("GROQ_API_KEY", "")
     openai_key = os.getenv("OPENAI_API_KEY", "")
-    if not (groq_key or openai_key):
-        print("ERROR: Set GROQ_API_KEY or OPENAI_API_KEY in .env to run this test.")
+    if provider not in ("groq", "openai", "ollama"):
+        print(f"ERROR: Unsupported INTENT_MODEL_PROVIDER: {provider!r}")
         sys.exit(1)
+    if provider == "groq" and not groq_key:
+        print("ERROR: Set GROQ_API_KEY in .env to run this test with INTENT_MODEL_PROVIDER=groq.")
+        sys.exit(1)
+    if provider == "openai" and not openai_key:
+        print("ERROR: Set OPENAI_API_KEY in .env to run this test with INTENT_MODEL_PROVIDER=openai.")
+        sys.exit(1)
+    # provider == "ollama": no API key needed, just a reachable local server
 
     passed = 0
     failed = 0

@@ -10,7 +10,7 @@ import ModelsPage          from "@/components/models/ModelsPage";
 import AdminPage           from "@/components/admin/AdminPage";
 import {
   listConversations, deleteConversation,
-  connectAlerts, getSensorData,
+  connectAlerts, getSensorData, getAlertHistory,
 } from "@/lib/api";
 
 const CONTAINER_ID = "container-01";
@@ -199,13 +199,39 @@ function useChatState(userId, isPro) {
     return () => { cancelled = true; clearInterval(id); };
   }, [isPro]);
 
+  // Real detection time when the server supplies one (live SSE `created_at`,
+  // or a history row's `created_at`); only falls back to "now" if it's ever
+  // missing, instead of always fabricating a receipt-time timestamp.
+  const formatTime = (iso) => (iso ? new Date(iso).toLocaleString() : new Date().toLocaleString());
+
+  // Hydrate from persisted history on load — otherwise a page refresh loses
+  // every alert that isn't still sitting in the live SSE stream.
   useEffect(() => {
     if (!isPro) return;
-    const now = () => new Date().toTimeString().slice(0, 5);
+    let cancelled = false;
+    (async () => {
+      const rows = await getAlertHistory(userId, 50);
+      if (cancelled || !rows.length) return;
+      // DB returns newest-first; the UI expects oldest-first (last = most recent).
+      const entries = [...rows].reverse().map((r) => ({
+        id:       r.id,
+        text:     r.message,
+        time:     formatTime(r.created_at),
+        severity: r.severity || "medium",
+        affected: r.affected || [],
+        source:   r.source   || "model",
+      }));
+      setAllAlerts((a) => [...entries, ...a]);
+    })();
+    return () => { cancelled = true; };
+  }, [isPro, userId]);
+
+  useEffect(() => {
+    if (!isPro) return;
     return connectAlerts(userId, CONTAINER_ID, {
       onAlert: (text, meta) => {
         const entry = {
-          text, time: now(),
+          text, time: formatTime(meta?.createdAt),
           severity: meta?.severity || "medium",
           affected: meta?.affected || [],
           source:   meta?.source   || "model",

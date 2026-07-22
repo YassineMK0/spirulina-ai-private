@@ -1,19 +1,16 @@
 """Proactive container monitor — threshold rules + alert generation.
 
-Fires on a schedule (every 5 min via APScheduler in api/main.py).
+Fires on a schedule (every 15 min via APScheduler in api/main.py).
 For each active session with a container_id, reads sensors and checks
-hardcoded thresholds. When a threshold is breached, generates a short
-plain-language alert using the reasoning LLM.
+thresholds. When a threshold is breached, generates a short plain-language
+alert using the reasoning LLM.
 
-Threshold rules (hardcoded — ML models will replace these later):
-    pH          < 7.5             -> CRITICAL alert
-    pH          > 10.8            -> WARNING
-    temperature > 39 C            -> WARNING
-    temperature < 20 C            -> WARNING
-    od680       > 1.4             -> HARVEST alert
-    conductivity_ms > 35          -> WARNING
-    dissolved_o2_pct < 60         -> WARNING
-    status == "error"             -> CRITICAL alert
+Threshold rules: pH/EC/Temperature/DO/Luminosite (+ rate-of-change) are
+delegated to models/anomaly_model/rules.py -- the same expert table the M1
+anomaly detector uses -- so this fast loop and the ML path never disagree on
+thresholds. Only two checks stay local because they have no equivalent
+there: turbidity/harvest (agent's NTU sensor has no OD680 calibration) and
+raw sensor "error" status.
 """
 
 from __future__ import annotations
@@ -29,17 +26,7 @@ log = logging.getLogger("spirulina.monitor")
 # Threshold rules
 # ---------------------------------------------------------------------------
 
-# Each rule: (sensor_key, operator, threshold, severity, short_label)
-# severity: "critical" | "warning" | "harvest"
-_RULES: list[tuple[str, str, float, str, str]] = [
-    ("pH",          "<",  7.5,    "critical", "pH crash"),
-    ("pH",          ">",  10.8,   "warning",  "pH too high"),
-    ("temperature", ">",  39.0,   "warning",  "overheating"),
-    ("temperature", "<",  20.0,   "warning",  "too cold"),
-    ("turbidity",   ">",  300.0,  "harvest",  "ready to harvest"),
-    ("EC",          ">",  30000.0, "warning",  "high salinity"),   # 30 mS/cm = 30000 µS/cm
-    ("DO",          "<",  4.0,    "warning",  "low oxygen"),
-]
+_HARVEST_TURBIDITY_NTU = 300.0
 
 _SEVERITY_EMOJI = {
     "critical": "🚨",
@@ -47,41 +34,77 @@ _SEVERITY_EMOJI = {
     "harvest":  "🌾",
 }
 
+# Findings from rules.py need at least these snapshot values to evaluate --
+# evaluate_rules indexes them directly and doesn't tolerate None.
+_REQUIRED_SNAPSHOT_KEYS = ("pH", "EC", "DO_mgL", "Temperature", "Luminosite")
 
-def check_thresholds(sensor: dict) -> list[dict]:
+
+def check_thresholds(
+    sensor: dict,
+    previous: dict | None = None,
+    minutes_since_prev: float | None = None,
+) -> list[dict]:
     """Return a list of breached rules for the given sensor reading.
 
+    pH/EC/Temperature/DO/Luminosite checks (including rate-of-change, when
+    `previous`/`minutes_since_prev` are supplied) are delegated to
+    models/anomaly_model/rules.evaluate_rules -- the same table the M1
+    detector uses. Severity-1 (informational) findings are not surfaced as
+    breaches here; they're only actionable in aggregate via the ML path.
+
     Each breach is a dict:
-        { key, value, threshold, operator, severity, label, emoji }
+        { key, value, threshold, operator, severity, label, detail, emoji }
     """
-    breaches = []
-    for key, op, threshold, severity, label in _RULES:
-        value = sensor.get(key)
-        if value is None:
-            continue
-        breached = (op == "<" and value < threshold) or \
-                   (op == ">" and value > threshold)
-        if breached:
+    from models.anomaly_model import rules as _rules
+
+    breaches: list[dict] = []
+
+    snapshot      = _to_snapshot(sensor)
+    prev_snapshot = _to_snapshot(previous) if previous else None
+
+    if all(snapshot.get(k) is not None for k in _REQUIRED_SNAPSHOT_KEYS):
+        for f in _rules.evaluate_rules(snapshot, prev_snapshot, minutes_since_prev):
+            if f.severity < 2:
+                continue  # informational only, not independently alertable
+            sensor_key = _PARAM_TO_SENSOR_KEY.get(f.parameter, f.parameter)
+            severity   = "critical" if f.severity == 3 else "warning"
             breaches.append({
-                "key":       key,
-                "value":     value,
-                "threshold": threshold,
-                "operator":  op,
+                "key":       sensor_key,
+                "value":     sensor.get(sensor_key),
+                "threshold": None,
+                "operator":  "rule",
                 "severity":  severity,
-                "label":     label,
+                "label":     f.label,
+                "detail":    f.detail,
                 "emoji":     _SEVERITY_EMOJI[severity],
             })
 
-    # Also check status field directly
+    # Turbidity/harvest: agent's NTU turbidity sensor has no OD680 calibration
+    # yet (see _to_snapshot), so it can't go through rules.evaluate_rules.
+    turbidity = sensor.get("turbidity")
+    if turbidity is not None and turbidity > _HARVEST_TURBIDITY_NTU:
+        breaches.append({
+            "key":       "turbidity",
+            "value":     turbidity,
+            "threshold": _HARVEST_TURBIDITY_NTU,
+            "operator":  ">",
+            "severity":  "harvest",
+            "label":     "ready to harvest",
+            "detail":    f"turbidity={turbidity:.1f} NTU (>{_HARVEST_TURBIDITY_NTU:.0f})",
+            "emoji":     _SEVERITY_EMOJI["harvest"],
+        })
+
+    # Sensor error status: no equivalent in rules.py
     if sensor.get("status") == "error" and not any(b["severity"] == "critical" for b in breaches):
         breaches.append({
-            "key":      "status",
-            "value":    "error",
+            "key":       "status",
+            "value":     "error",
             "threshold": None,
-            "operator": "==",
-            "severity": "critical",
-            "label":    "sensor error",
-            "emoji":    "🚨",
+            "operator":  "==",
+            "severity":  "critical",
+            "label":     "sensor error",
+            "detail":    "status=error",
+            "emoji":     "🚨",
         })
 
     return breaches
@@ -214,25 +237,44 @@ def _run_ml_prediction(container_id: str) -> dict:
         return {}
 
 
+# Who actually caught the anomaly -- shown verbatim in every alert so it's
+# never ambiguous whether a fast threshold rule or the ML predictor fired.
+_SOURCE_LABEL = {
+    "rule":       "Threshold rule",
+    "model":      "M1 predictor (rule engine + seasonal ML, run every 15 min)",
+    "rule+model": "Threshold rule + M1 predictor (agreed independently)",
+    "model-24h":  "M1 predictor -- 24h pattern check (LOF, runs once/day)",
+}
+
+
 def generate_alert_text(
     container_id: str,
     sensor: dict,
     breaches: list[dict],
     ml_result: dict | None = None,
+    source: str = "rule",
 ) -> str:
     """Generate a short plain-language alert from the reasoning LLM.
 
-    Falls back to a template-based message if the LLM call fails.
+    Falls back to a template-based message if the LLM call fails. Either way,
+    the returned text always ends with an explicit "Source:" line stating
+    whether a threshold rule or the ML predictor (or both) fired -- see
+    _SOURCE_LABEL -- so that's never left to the LLM to get right or to a
+    frontend badge alone to convey.
     """
     if not breaches:
         return ""
 
-    # Build a compact breach summary for the prompt
-    breach_lines = "\n".join(
-        f"- {b['label'].upper()}: {b['key']} = {b['value']} "
-        f"(threshold: {b['operator']} {b['threshold']})"
-        for b in breaches
-    )
+    source_line = f"\n\n_Source: {_SOURCE_LABEL.get(source, source)}_"
+
+    # Build a compact breach summary for the prompt -- prefer the rule's own
+    # detail string (exact values + threshold baked in by rules.py) when
+    # available, since it's more precise than the generic key/threshold form.
+    def _breach_line(b: dict) -> str:
+        detail = b.get("detail") or f"{b['key']} = {b['value']} (threshold: {b['operator']} {b['threshold']})"
+        return f"- {b['label'].upper()}: {detail}"
+
+    breach_lines = "\n".join(_breach_line(b) for b in breaches)
     severity = max(
         (b["severity"] for b in breaches),
         key=lambda s: {"harvest": 0, "warning": 1, "critical": 2}[s],
@@ -294,7 +336,8 @@ def generate_alert_text(
             f"'increase aeration to emergency level').\n"
             f"3. State what happens if untreated within 2 hours (be direct about culture loss).\n"
             f"Start with '{emoji} {severity.upper()} — {container_id}:' then give sentence 1, 2, 3.\n"
-            f"Do NOT repeat the threshold table. Use the exact sensor values from above."
+            f"Do NOT repeat the threshold table. Use the exact sensor values from above. "
+            f"Do NOT state which system detected this — that line is appended automatically."
         )
 
         text = reasoning_generate(
@@ -303,16 +346,18 @@ def generate_alert_text(
             history=[],
             sensor_state=sensor,
         )
-        return text.strip()
+        return text.strip() + source_line
 
     except Exception:
-        labels = ", ".join(b["label"] for b in breaches)
-        vals = "  ".join(f"{k}={sensor.get(k,'?')}" for k in _sensor_keys if k in sensor)
+        # No LLM available -- still state exactly which rule(s)/detector fired
+        # and why, using the same detail strings the LLM prompt would've used,
+        # instead of a contentless generic message.
+        finding_lines = "\n".join(f"- {b['label']}: {b.get('detail', b['value'])}" for b in breaches)
         return (
             f"{emoji} **{severity.upper()} — {container_id}**\n\n"
-            f"**{labels}**\n\n"
-            f"{vals}\n\n"
+            f"{finding_lines}\n\n"
             f"Take immediate corrective action."
+            f"{source_line}"
         )
 
 
@@ -358,7 +403,7 @@ def run_monitor_check(push_alert_fn) -> None:
     job returns immediately and never blocks the next tick.
     """
     import threading
-    from agent.sensors import get_sensor_reading
+    from agent.sensors import get_sensor_reading, get_history
 
     if not _active_sessions:
         log.debug("no active sessions — skipping check")
@@ -371,7 +416,22 @@ def run_monitor_check(push_alert_fn) -> None:
                      container_id, user_id[:8],
                      sensor.get("pH"), sensor.get("DO"),
                      sensor.get("temperature"), sensor.get("EC"))
-            breaches  = check_thresholds(sensor)
+
+            # Previous reading + elapsed minutes, so check_thresholds can also
+            # run rules.py's rate-of-change checks (e.g. a fast pH crash that
+            # hasn't left the absolute-bounds range yet).
+            previous, minutes_since_prev = None, None
+            history = get_history(container_id, n=2)
+            if len(history) > 1:
+                previous = history[-2]
+                try:
+                    now_ts  = datetime.fromisoformat(sensor.get("timestamp") or history[-1]["date"])
+                    prev_ts = datetime.fromisoformat(previous["date"])
+                    minutes_since_prev = (now_ts - prev_ts).total_seconds() / 60.0
+                except (KeyError, ValueError, TypeError):
+                    minutes_since_prev = None
+
+            breaches  = check_thresholds(sensor, previous, minutes_since_prev)
             ml_result = _run_ml_prediction(container_id)
 
             ml_anomaly      = ml_result.get("anomaly", False)
@@ -386,8 +446,9 @@ def run_monitor_check(push_alert_fn) -> None:
                     top_finding = max(findings, key=lambda f: f["severity"])
                     param       = top_finding["parameter"]
                     label       = top_finding["label"]
+                    detail      = top_finding.get("detail", label)
                 else:
-                    param, label = "sensor", "ML anomaly"
+                    param, label, detail = "sensor", "ML anomaly", "undetermined"
                 sensor_key = _PARAM_TO_SENSOR_KEY.get(param, param)
                 breaches = [{
                     "key":       sensor_key,
@@ -396,6 +457,7 @@ def run_monitor_check(push_alert_fn) -> None:
                     "operator":  "ml",
                     "severity":  ml_result.get("severity", "warning"),
                     "label":     f"ML anomaly ({label})",
+                    "detail":    detail,
                     "emoji":     _SEVERITY_EMOJI.get(ml_result.get("severity", "warning"), "⚠️"),
                 }]
 
@@ -405,6 +467,10 @@ def run_monitor_check(push_alert_fn) -> None:
 
             # Mark dedup NOW so next tick doesn't re-fire while LLM is running
             _last_alerts[user_id] = breach_key
+
+            # Timestamp the moment of detection, not whenever the (slow,
+            # backgrounded) LLM call happens to finish composing the text.
+            detected_at = datetime.now(timezone.utc).isoformat()
 
             severity = max(
                 (b["severity"] for b in breaches),
@@ -433,23 +499,23 @@ def run_monitor_check(push_alert_fn) -> None:
                 source = "model"
 
             # Offload the slow Groq call — scheduler job returns immediately
-            def _llm_and_push(uid, cid, s, br, ml, sev, aff, src):
+            def _llm_and_push(uid, cid, s, br, ml, sev, aff, src, ts):
                 try:
-                    text = generate_alert_text(cid, s, br, ml)
+                    text = generate_alert_text(cid, s, br, ml, source=src)
                     if not text:
                         return
                     try:
                         from data.alerts import alert_store
-                        alert_store.save(uid, cid, text, sev)
+                        alert_store.save(uid, cid, text, sev, source=src, affected=aff, created_at=ts)
                     except Exception as _e:
                         log.error("alert DB save failed: %s", _e)
-                    push_alert_fn(uid, text, sev, aff, src)
+                    push_alert_fn(uid, text, sev, aff, src, ts)
                 except Exception as exc:
                     log.error("alert generation failed: %s", exc, exc_info=True)
 
             threading.Thread(
                 target=_llm_and_push,
-                args=(user_id, container_id, sensor, breaches, ml_result, severity, affected, source),
+                args=(user_id, container_id, sensor, breaches, ml_result, severity, affected, source, detected_at),
                 daemon=True,
                 name=f"alert-{container_id[:8]}",
             ).start()
@@ -504,7 +570,12 @@ def run_combination_model_check(push_alert_fn) -> None:
             if _last_combination_alerts.get(user_id) == breach_key:
                 continue
             _last_combination_alerts[user_id] = breach_key
+            detected_at = datetime.now(timezone.utc).isoformat()
 
+            combo_detail = (
+                f"score={combo['score']:.3f} — inhabituel par rapport "
+                f"a l'historique 24h de ce site"
+            )
             breach = {
                 "key":       "combination_model",
                 "value":     round(combo["score"], 3),
@@ -512,6 +583,7 @@ def run_combination_model_check(push_alert_fn) -> None:
                 "operator":  "lof",
                 "severity":  "warning",
                 "label":     "Combination anomaly (24h pattern)",
+                "detail":    combo_detail,
                 "emoji":     _SEVERITY_EMOJI["warning"],
             }
             ml_result = {
@@ -521,29 +593,29 @@ def run_combination_model_check(push_alert_fn) -> None:
                     "parameter": "combination_model",
                     "severity":  2,
                     "label":     "Anomalie combinee (LOF)",
-                    "detail":    f"score={combo['score']:.3f} — inhabituel par rapport "
-                                 f"a l'historique 24h de ce site",
+                    "detail":    combo_detail,
                 }],
                 "seasonal": {},
             }
 
-            def _llm_and_push(uid, cid, s, br, ml):
+            def _llm_and_push(uid, cid, s, br, ml, ts):
                 try:
-                    text = generate_alert_text(cid, s, [br], ml)
+                    text = generate_alert_text(cid, s, [br], ml, source="model-24h")
                     if not text:
                         return
                     try:
                         from data.alerts import alert_store
-                        alert_store.save(uid, cid, text, "warning")
+                        alert_store.save(uid, cid, text, "warning", source="model-24h",
+                                          affected=["combination_model"], created_at=ts)
                     except Exception as _e:
                         log.error("alert DB save failed: %s", _e)
-                    push_alert_fn(uid, text, "warning", ["combination_model"], "model-24h")
+                    push_alert_fn(uid, text, "warning", ["combination_model"], "model-24h", ts)
                 except Exception as exc:
                     log.error("combination-model alert generation failed: %s", exc, exc_info=True)
 
             threading.Thread(
                 target=_llm_and_push,
-                args=(user_id, container_id, sensor, breach, ml_result),
+                args=(user_id, container_id, sensor, breach, ml_result, detected_at),
                 daemon=True,
                 name=f"combo-alert-{container_id[:8]}",
             ).start()

@@ -631,45 +631,57 @@ class TestFormatResponseNode:
 # =============================================================================
 
 class TestCheckThresholds:
-    """check_thresholds: evaluates sensor dict against hard-coded rules."""
+    """check_thresholds: pH/EC/Temperature/DO/Luminosite are delegated to
+    models/anomaly_model/rules.evaluate_rules (the same table M1 uses) --
+    see agent/monitor.py. That table indexes a complete snapshot directly, so
+    (matching how check_thresholds is actually called in production, on a
+    real MQTT payload that always has every field -- see agent/sensors.py's
+    payload docstring) these tests build on a complete baseline reading
+    rather than single-key partial dicts, except where partial-input
+    tolerance is itself the behavior under test."""
+
+    _BASELINE = {
+        "pH": 9.9, "EC": 20000, "DO": 7.5,
+        "temperature": 36, "luminosity": 12000, "turbidity": 200,
+    }
 
     def _check(self, sensor):
         from agent.monitor import check_thresholds
         return check_thresholds(sensor)
 
+    def _reading(self, **overrides):
+        return {**self._BASELINE, **overrides}
+
     def test_clean_readings_return_no_breaches(self):
-        sensor = {
-            "pH": 9.5,
-            "temperature": 35,
-            "turbidity": 200,
-            "EC": 20000,
-            "DO": 7.0,
-        }
-        assert self._check(sensor) == []
+        assert self._check(self._reading()) == []
 
     def test_ph_crash_returns_critical(self):
-        breaches = self._check({"pH": 7.0})
+        breaches = self._check(self._reading(pH=7.0))
         assert any(b["severity"] == "critical" for b in breaches)
 
     def test_high_ph_returns_warning(self):
-        breaches = self._check({"pH": 11.0})
+        # rules.py: pH 9.5-11 optimal, >11 (and <9.5) is a warning-tier breach
+        breaches = self._check(self._reading(pH=11.2))
         assert any(b["severity"] == "warning" for b in breaches)
 
     def test_high_turbidity_returns_harvest(self):
-        breaches = self._check({"turbidity": 320.0})
+        breaches = self._check(self._reading(turbidity=320.0))
         assert any(b["severity"] == "harvest" for b in breaches)
 
     def test_status_error_returns_critical(self):
-        breaches = self._check({"status": "error"})
+        breaches = self._check(self._reading(status="error"))
         assert any(b["severity"] == "critical" for b in breaches)
 
     def test_missing_key_ignored(self):
-        # No crash for partial sensor readings
+        # A partial reading (e.g. one field momentarily absent) can't be
+        # evaluated by rules.evaluate_rules -- must not crash, and produces
+        # no rule-table breach (only the two locally-checked fields, turbidity
+        # and status, are independently evaluable from a partial dict).
         breaches = self._check({"pH": 9.5})
         assert breaches == []
 
     def test_multiple_breaches_returned(self):
-        sensor = {"pH": 7.0, "temperature": 42, "turbidity": 320.0}
+        sensor = self._reading(pH=7.0, temperature=42, turbidity=320.0)
         breaches = self._check(sensor)
         assert len(breaches) >= 2
 

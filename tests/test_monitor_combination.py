@@ -179,10 +179,11 @@ class TestRunCombinationModelCheck:
         monitor.run_combination_model_check(lambda *a: pushed.append(a))
 
         assert len(pushed) == 1
-        uid, text, sev, affected, source = pushed[0]
+        uid, text, sev, affected, source, created_at = pushed[0]
         assert sev == "warning"
         assert affected == ["combination_model"]
         assert source == "model-24h"
+        assert created_at  # real detection timestamp, not fabricated client-side
 
     def test_dedup_skips_repeat_alert_on_same_score(self, container_id, monkeypatch):
         self._stub_generate_alert_text(monkeypatch)

@@ -193,6 +193,19 @@ export async function predictCPC(imageFile) {
   return data; // { cpc_mgml, unit, in_training_range, training_range }
 }
 
+export async function predictSpecies(imageFile) {
+  const form = new FormData();
+  form.append("file", imageFile);
+  const res = await fetch(`${API_BASE}/species/predict`, {
+    method:  "POST",
+    headers: authHeaders(), // no Content-Type — let browser set multipart boundary
+    body:    form,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || `Error ${res.status}`);
+  return data; // { species, confidence, probabilities, is_target_species, warning }
+}
+
 // ── SSE alerts ────────────────────────────────────────────────────────────────
 
 export function connectAlerts(userId, containerId, { onAlert, onConnect, onError } = {}) {
@@ -205,10 +218,27 @@ export function connectAlerts(userId, containerId, { onAlert, onConnect, onError
     try {
       const data = JSON.parse(e.data);
       if      (data.type === "connected") onConnect?.();
-      else if (data.type === "alert")     onAlert?.(data.text, { severity: data.severity, affected: data.affected, source: data.source });
+      else if (data.type === "alert")     onAlert?.(data.text, {
+        severity:  data.severity,
+        affected:  data.affected,
+        source:    data.source,
+        createdAt: data.created_at,
+      });
     } catch { /* ignore malformed frames */ }
   };
 
   src.onerror = () => onError?.();
   return () => src.close();
+}
+
+// ── Alert history ─────────────────────────────────────────────────────────────
+
+export async function getAlertHistory(userId, limit = 50) {
+  try {
+    const res = await fetch(`${API_BASE}/alerts/${userId}/history?limit=${limit}`, {
+      cache: "no-store", headers: authHeaders(),
+    });
+    if (!res.ok) return [];
+    return res.json(); // [{ id, user_id, container_id, message, severity, source, affected, created_at }]
+  } catch { return []; }
 }

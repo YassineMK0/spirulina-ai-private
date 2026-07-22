@@ -225,7 +225,7 @@ Call the relevant tools to gather exact figures. Available tools:
 - `calculate_ph_correction`   — dose of NaHCO3/acid to hit target pH
 - `calculate_ec_correction`   — nutrient addition or dilution to hit target EC
 - `diagnose_culture_symptom`  — structured checklist for visible symptoms
-- `format_action_plan`        — format final prioritised checklist
+- `format_action_plan`        — optional: sequence multiple concrete actions in order (skip for a single recommendation)
 
 CRITICAL RULES FOR ALERTS:
 - If the user mentions "alert", "warning", "alarm", "what happened", or asks if anything is wrong → call `get_recent_alerts` IMMEDIATELY before anything else
@@ -233,24 +233,24 @@ CRITICAL RULES FOR ALERTS:
 - If `get_recent_alerts` returns no alerts, say so clearly — do NOT invent alerts from sensor readings
 - Never contradict the alert log in your synthesis section
 
+CRITICAL RULE FOR CURRENT READINGS:
+- If the user asks for a CURRENT/live value ("what's my pH right now", "what's the temperature", "what is my current EC") — answer directly from the `<sensor_readings>` block already provided above, in this human message. Do NOT call `get_recent_alerts` for this — that tool returns alert HISTORY, not the current reading, and will give a stale/misleading answer.
+- If `<sensor_readings>` is absent from the context, say plainly that no live reading is available for this container right now (e.g. no device has reported in) — do NOT substitute values from old alerts and present them as the current reading.
+
 STEP 3 — SYNTHESISE
-After all tool calls complete, write the final response:
-
-## Situation
-[1–2 sentences — what is happening and why it matters]
-
-## Analysis
-[What the sensor data, ML outputs, and tool results reveal]
-
-## Action Steps
-[Reference the tool output checklists here — do not invent doses]
-
-## Follow-up
-[What to monitor and when to re-check]
+After all tool calls complete, write the final response as you would actually
+talk to the operator — clear, well-formatted markdown prose, not a fixed
+report template. There is no mandatory section skeleton: use headers, a
+short list, or plain paragraphs, whichever fits what you're actually saying.
+A one-line answer to a simple question should be one line, not four headers.
+Cover, in whatever shape reads best:
+- what's going on and why (grounded in the tool results, not invented)
+- the concrete numbers/doses from the tools (never guess a chemical dose)
+- what to actually do about it, if anything
+- what to check afterward, only if that's genuinely useful here
 
 RULES
 - Use tools when you need calculations — never guess chemical doses
-- Keep Action Steps to 3–5 items max
 - Bold critical values and actions
 - If anomaly score > 0.8 or status=error, say so clearly and recommend specialist contact
 - Respond in the same language the user asked in (FR or EN)
@@ -321,6 +321,17 @@ def reasoning_agent(state: AgentState) -> dict[str, Any]:
                 model=os.getenv("GENERATOR_MODEL_NAME", "llama-3.3-70b-versatile"),
                 temperature=0.1,
                 max_tokens=2048,
+            ).bind_tools(tools)
+        elif provider == "ollama":
+            from langchain_ollama import ChatOllama
+            llm = ChatOllama(
+                model=os.getenv("GENERATOR_MODEL_NAME", "qwen3:8b"),
+                base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+                temperature=0.1,
+                num_predict=2048,
+                reasoning=False,  # avoid <think> blocks leaking into the
+                                  # plan panel / final answer, and keep
+                                  # tool-calling reliable
             ).bind_tools(tools)
         else:
             from langchain_openai import ChatOpenAI
@@ -410,8 +421,9 @@ def reasoning_agent(state: AgentState) -> dict[str, Any]:
     if not final_text:
         final_text = "I was unable to generate a response. Please try again."
 
-    # Strip chain-of-thought tags (R1-style models)
+    # Strip chain-of-thought tags (R1/Qwen3-style models)
     final_text = re.sub(r"<think>.*?</think>", "", final_text, flags=re.DOTALL).strip()
+    plan_text  = re.sub(r"<think>.*?</think>", "", plan_text,  flags=re.DOTALL).strip()
 
     print(f"  [agent] tool_calls={len(tool_calls_log)}  response_len={len(final_text)}")
 
