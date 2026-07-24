@@ -1,11 +1,14 @@
 
 echo "[pre-commit] checking staged Python files for syntax errors..."
-STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM -- '*.py')
-if [ -n "$STAGED_PY" ]; then
-  echo "$STAGED_PY" | xargs .venv313/Scripts/python.exe -m py_compile || {
-    echo "[pre-commit] Python syntax check FAILED -- fix the file(s) above before committing."
-    exit 1
-  }
+# NUL-delimited (-z / -0) end to end: staged paths can contain spaces (e.g.
+# "mqtt simulator/sensors.py"), and piping straight into xargs -- rather than
+# capturing into a shell variable first -- matters here too, since bash's
+# $(...) command substitution silently drops NUL bytes and would otherwise
+# glue every path back together into one unopenable string.
+git diff --cached --name-only --diff-filter=ACM -z -- '*.py' | xargs -0 -r .venv313/Scripts/python.exe -m py_compile
+if [ $? -ne 0 ]; then
+  echo "[pre-commit] Python syntax check FAILED -- fix the file(s) above before committing."
+  exit 1
 fi
 
 STAGED_FRONTEND=$(git diff --cached --name-only --diff-filter=ACM -- 'spirulina-ui/*.js' 'spirulina-ui/*.jsx')

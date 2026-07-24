@@ -3,9 +3,9 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import AlertsPage from "@/components/alerts/AlertsPage";
 
 const mockAlerts = [
-  { severity: "critical", affected: ["pH"], source: "model",       text: "pH dropped below 8.5.", time: "10:05" },
-  { severity: "medium",   affected: ["EC"], source: "rule",        text: "EC is elevated.",       time: "09:30" },
-  { severity: "low",      affected: ["DO"], source: "rule+model",  text: "DO recovering.",        time: "08:00" },
+  { id: "1", severity: "critical", affected: ["pH"], source: "model",       text: "pH dropped below 8.5.", time: "10:05", createdAt: "2026-01-01T10:05:00Z" },
+  { id: "2", severity: "medium",   affected: ["EC"], source: "rule",        text: "EC is elevated.",       time: "09:30", createdAt: "2026-01-01T09:30:00Z" },
+  { id: "3", severity: "low",      affected: ["DO"], source: "rule+model",  text: "DO recovering.",        time: "08:00", createdAt: "2026-01-01T08:00:00Z" },
 ];
 
 // ── empty state ───────────────────────────────────────────────────────────────
@@ -59,13 +59,13 @@ describe("AlertsPage — alert list", () => {
   });
 });
 
-// ── active / past tags ────────────────────────────────────────────────────────
+// ── latest / past tags ────────────────────────────────────────────────────────
 
-describe("AlertsPage — ACTIVE / PAST tags", () => {
-  it("marks the most recent alert (displayed first) as ACTIVE", () => {
+describe("AlertsPage — LATEST / PAST tags", () => {
+  it("marks the most recent alert (displayed first) as LATEST", () => {
     render(<AlertsPage alerts={mockAlerts} />);
-    // alerts are displayed in reverse order — first rendered = last in array = critical (index 0 reversed)
-    expect(screen.getByText("ACTIVE")).toBeInTheDocument();
+    // alerts are displayed newest-first by createdAt — pH (10:05) is most recent
+    expect(screen.getByText("LATEST")).toBeInTheDocument();
   });
 
   it("renders PAST tags for older alerts", () => {
@@ -78,7 +78,7 @@ describe("AlertsPage — ACTIVE / PAST tags", () => {
 // ── Ask agent button ──────────────────────────────────────────────────────────
 
 describe("AlertsPage — Ask agent button", () => {
-  it("shows 'Ask agent' button only for the active alert", () => {
+  it("shows 'Ask agent' button only for the latest alert", () => {
     render(<AlertsPage alerts={mockAlerts} />);
     const buttons = screen.getAllByText(/Ask agent/);
     expect(buttons.length).toBe(1);
@@ -95,9 +95,9 @@ describe("AlertsPage — Ask agent button", () => {
 // ── single alert edge case ────────────────────────────────────────────────────
 
 describe("AlertsPage — single alert", () => {
-  it("marks the single alert as ACTIVE (not PAST)", () => {
+  it("marks the single alert as LATEST (not PAST)", () => {
     render(<AlertsPage alerts={[mockAlerts[0]]} />);
-    expect(screen.getByText("ACTIVE")).toBeInTheDocument();
+    expect(screen.getByText("LATEST")).toBeInTheDocument();
     expect(screen.queryByText("PAST")).not.toBeInTheDocument();
   });
 });

@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 
 import { C } from "@/lib/theme";
 import { Tag, Label } from "@/components/atoms";
+import TrendCharts from "@/components/dashboard/TrendCharts";
 
 const SensorCard = ({ label, val, unit, color, min, max, oMin, oMax, trend, status = "ok" }) => {
   const pct = Math.min(Math.max(((parseFloat(val) - min) / (max - min)) * 100, 2), 98);
@@ -49,7 +50,7 @@ function useDataAge(timestamp) {
   return age;
 }
 
-export default function DashboardPage({ sensorData }) {
+export default function DashboardPage({ sensorData, containerId }) {
   const s   = sensorData || {};
   const age = useDataAge(s.timestamp);
 
@@ -94,6 +95,7 @@ export default function DashboardPage({ sensorData }) {
           )}
         </div>
       </div>
+      {containerId && <TrendCharts containerId={containerId} />}
     </div>
   );
 }

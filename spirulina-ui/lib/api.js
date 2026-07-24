@@ -180,6 +180,16 @@ export async function getSensorData(containerId) {
   } catch { return null; }
 }
 
+export async function getSensorHistory(containerId, days = 14) {
+  try {
+    const res = await fetch(`${API_BASE}/sensors/${containerId}/history?days=${days}`, {
+      cache: "no-store", headers: authHeaders(),
+    });
+    if (!res.ok) return [];
+    return res.json(); // [{ date, pH, EC, DO, temperature, luminosity, turbidity }]
+  } catch { return []; }
+}
+
 export async function predictCPC(imageFile) {
   const form = new FormData();
   form.append("file", imageFile);
@@ -223,6 +233,7 @@ export function connectAlerts(userId, containerId, { onAlert, onConnect, onError
         affected:  data.affected,
         source:    data.source,
         createdAt: data.created_at,
+        detail:    data.detail,
       });
     } catch { /* ignore malformed frames */ }
   };

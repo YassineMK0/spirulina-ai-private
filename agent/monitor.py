@@ -110,6 +110,22 @@ def check_thresholds(
     return breaches
 
 
+def _breach_signature(breaches: list[dict]) -> str:
+    """Coarse, direction-aware identity for a set of breaches -- used by the
+    frontend to tell two genuinely different episodes on the same sensor
+    apart (e.g. pH crashing to 7.0 vs pH spiking to 12.0), which the label
+    alone can't do since rules.py uses one label for both directions of a
+    given check. Values are rounded to the nearest whole unit so a single
+    persisting episode still collapses across repeated ticks despite sensor
+    noise, while genuinely different values (7 vs 12) stay distinct."""
+    parts = []
+    for b in sorted(breaches, key=lambda b: b["key"]):
+        v = b["value"]
+        v = round(v) if isinstance(v, (int, float)) else v
+        parts.append(f"{b['key']}:{v}")
+    return ",".join(parts)
+
+
 _anomaly_detector = None  # lazy-loaded singleton (joblib load is not free)
 
 # anomaly_model rule-finding parameter names -> agent sensor reading keys
@@ -320,23 +336,43 @@ def generate_alert_text(
 
         context = format_context(retrieve("spirulina anomaly diagnosis corrective action", top_k=4))
 
+        # Breaches with no numeric value (sensor status=error, equipment/
+        # connectivity faults) have nothing chemistry-related to explain --
+        # without an explicit guard the LLM tends to grab an unrelated number
+        # from the "current sensor readings" context block and fabricate a
+        # plausible-sounding but wrong water-chemistry cause for them.
+        non_chemistry = [b for b in breaches if not isinstance(b["value"], (int, float))]
+        guard = (
+            f"\nIMPORTANT: {', '.join(b['label'] for b in non_chemistry)} has no water-chemistry "
+            f"cause -- it is an equipment/sensor/connectivity problem. Do NOT invent a pH, EC, "
+            f"nutrient, or temperature explanation for it; describe it as a hardware/data issue "
+            f"and tell the operator to check the physical sensor and its connection.\n"
+            if non_chemistry else ""
+        )
+
         prompt = (
             f"=== AUTOMATIC ALERT — Container {container_id} ===\n\n"
-            f"Current sensor readings:\n{sensor_lines}\n\n"
-            f"Triggered threshold alerts:\n{breach_lines}\n"
-            f"{ml_lines}\n"
+            f"Current sensor readings (context only -- do not treat as anomalous unless it also "
+            f"appears in 'Triggered threshold alerts' below):\n{sensor_lines}\n\n"
+            f"Triggered threshold alerts (the ONLY things actually wrong -- ground sentence 1 in "
+            f"these and nothing else):\n{breach_lines}\n"
+            f"{ml_lines}"
+            f"{guard}\n"
             f"You are an expert spirulina cultivation assistant (AlgaePool protocol, Dominique Delobel, June 2026).\n"
             f"Answer in exactly 3 sentences:\n"
-            f"1. Name the specific problem using the exact sensor values "
+            f"1. Name the specific problem using ONLY the triggered alerts above, with their exact values "
             f"(e.g. 'pH of 7.0 indicates Chlorella contamination or CO2 over-injection', "
             f"'temperature of 42 C signals heater malfunction', "
-            f"'DO of 2.5 mg/L means oxygen depletion from bacterial bloom').\n"
+            f"'DO of 2.5 mg/L means oxygen depletion from bacterial bloom'). "
+            f"Do not reference a sensor reading that isn't listed as a triggered alert.\n"
             f"2. State the one action the operator must take RIGHT NOW (be specific — "
             f"e.g. 'add NaHCO3 to raise pH', 'shut off heater and add cold water', "
-            f"'increase aeration to emergency level').\n"
-            f"3. State what happens if untreated within 2 hours (be direct about culture loss).\n"
+            f"'increase aeration to emergency level', or for an equipment fault, 'inspect the sensor "
+            f"and its wiring/connection').\n"
+            f"3. State what happens if untreated within 2 hours (be direct about culture loss, or "
+            f"about losing visibility into the culture if it's an equipment fault).\n"
             f"Start with '{emoji} {severity.upper()} — {container_id}:' then give sentence 1, 2, 3.\n"
-            f"Do NOT repeat the threshold table. Use the exact sensor values from above. "
+            f"Do NOT repeat the threshold table. Use the exact values from the triggered alerts only. "
             f"Do NOT state which system detected this — that line is appended automatically."
         )
 
@@ -498,24 +534,26 @@ def run_monitor_check(push_alert_fn) -> None:
             else:
                 source = "model"
 
+            detail_sig = _breach_signature(breaches)
+
             # Offload the slow Groq call — scheduler job returns immediately
-            def _llm_and_push(uid, cid, s, br, ml, sev, aff, src, ts):
+            def _llm_and_push(uid, cid, s, br, ml, sev, aff, src, ts, det):
                 try:
                     text = generate_alert_text(cid, s, br, ml, source=src)
                     if not text:
                         return
                     try:
                         from data.alerts import alert_store
-                        alert_store.save(uid, cid, text, sev, source=src, affected=aff, created_at=ts)
+                        alert_store.save(uid, cid, text, sev, source=src, affected=aff, created_at=ts, detail=det)
                     except Exception as _e:
                         log.error("alert DB save failed: %s", _e)
-                    push_alert_fn(uid, text, sev, aff, src, ts)
+                    push_alert_fn(uid, text, sev, aff, src, ts, det)
                 except Exception as exc:
                     log.error("alert generation failed: %s", exc, exc_info=True)
 
             threading.Thread(
                 target=_llm_and_push,
-                args=(user_id, container_id, sensor, breaches, ml_result, severity, affected, source, detected_at),
+                args=(user_id, container_id, sensor, breaches, ml_result, severity, affected, source, detected_at, detail_sig),
                 daemon=True,
                 name=f"alert-{container_id[:8]}",
             ).start()
@@ -598,7 +636,9 @@ def run_combination_model_check(push_alert_fn) -> None:
                 "seasonal": {},
             }
 
-            def _llm_and_push(uid, cid, s, br, ml, ts):
+            detail_sig = f"combination_model:{round(combo['score'])}"
+
+            def _llm_and_push(uid, cid, s, br, ml, ts, det):
                 try:
                     text = generate_alert_text(cid, s, [br], ml, source="model-24h")
                     if not text:
@@ -606,16 +646,16 @@ def run_combination_model_check(push_alert_fn) -> None:
                     try:
                         from data.alerts import alert_store
                         alert_store.save(uid, cid, text, "warning", source="model-24h",
-                                          affected=["combination_model"], created_at=ts)
+                                          affected=["combination_model"], created_at=ts, detail=det)
                     except Exception as _e:
                         log.error("alert DB save failed: %s", _e)
-                    push_alert_fn(uid, text, "warning", ["combination_model"], "model-24h", ts)
+                    push_alert_fn(uid, text, "warning", ["combination_model"], "model-24h", ts, det)
                 except Exception as exc:
                     log.error("combination-model alert generation failed: %s", exc, exc_info=True)
 
             threading.Thread(
                 target=_llm_and_push,
-                args=(user_id, container_id, sensor, breach, ml_result, detected_at),
+                args=(user_id, container_id, sensor, breach, ml_result, detected_at, detail_sig),
                 daemon=True,
                 name=f"combo-alert-{container_id[:8]}",
             ).start()

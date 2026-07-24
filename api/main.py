@@ -15,6 +15,7 @@ Endpoints
     GET    /alerts/{user_id}                       -> SSE proactive alerts
     GET    /alerts/{user_id}/history               -> persisted alert history (classified)
     GET    /sensors/{container_id}                 -> latest sensor reading
+    GET    /sensors/{container_id}/history         -> readings for last N days (default 14)
     GET    /models/{container_id}                  -> ML model outputs
     POST   /cpc/predict                            -> CPC concentration from image (multipart)
     POST   /species/predict                        -> microalgae species classification from image (multipart)
@@ -60,6 +61,7 @@ def _push_alert(
     affected: list | None = None,
     source: str = "model",
     created_at: str | None = None,
+    detail: str | None = None,
 ) -> None:
     q = _alert_queues.get(user_id)
     if q and _event_loop:
@@ -69,6 +71,7 @@ def _push_alert(
             "affected":   affected or [],
             "source":     source,
             "created_at": created_at,
+            "detail":     detail or "",
         }
         _event_loop.call_soon_threadsafe(q.put_nowait, item)
         log.info("alert pushed  user=%s", user_id[:8])
@@ -409,6 +412,17 @@ def get_sensors(container_id: str):
     # the Dashboard and the chat agent never see different data.
     data = get_sensor_reading(container_id)
     return JSONResponse(content=data or {}, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/sensors/{container_id}/history")
+def get_sensor_history(container_id: str, days: int = 14):
+    from datetime import datetime, timedelta, timezone
+
+    from data.store import sensor_store
+
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = sensor_store.get_since(container_id, since)
+    return JSONResponse(content=rows, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/models/{container_id}")

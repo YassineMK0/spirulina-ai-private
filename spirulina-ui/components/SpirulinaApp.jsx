@@ -214,12 +214,14 @@ function useChatState(userId, isPro) {
       if (cancelled || !rows.length) return;
       // DB returns newest-first; the UI expects oldest-first (last = most recent).
       const entries = [...rows].reverse().map((r) => ({
-        id:       r.id,
-        text:     r.message,
-        time:     formatTime(r.created_at),
-        severity: r.severity || "medium",
-        affected: r.affected || [],
-        source:   r.source   || "model",
+        id:        r.id,
+        text:      r.message,
+        time:      formatTime(r.created_at),
+        createdAt: r.created_at || null,
+        severity:  r.severity || "medium",
+        affected:  r.affected || [],
+        source:    r.source   || "model",
+        detail:    r.detail   || "",
       }));
       setAllAlerts((a) => [...entries, ...a]);
     })();
@@ -231,10 +233,13 @@ function useChatState(userId, isPro) {
     return connectAlerts(userId, CONTAINER_ID, {
       onAlert: (text, meta) => {
         const entry = {
+          id:        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `live-${Date.now()}-${Math.random()}`,
           text, time: formatTime(meta?.createdAt),
-          severity: meta?.severity || "medium",
-          affected: meta?.affected || [],
-          source:   meta?.source   || "model",
+          createdAt: meta?.createdAt || null,
+          severity:  meta?.severity || "medium",
+          affected:  meta?.affected || [],
+          source:    meta?.source   || "model",
+          detail:    meta?.detail   || "",
         };
         setAllAlerts ((a) => [...a, entry]);
         setChatAlerts((a) => [...a, entry]);
@@ -290,7 +295,7 @@ function ChatApp({ user, tier, C, logout }) {
   const {
     proPage, setProPage,
     conversations, activeConvId,
-    chatAlerts, activeAlerts, sensorData,
+    chatAlerts, allAlerts, activeAlerts, sensorData,
     handleNewChat, handleSelectConv, handleDeleteConv,
     handleConvCreated, handleMessageSent,
   } = useChatState(user.id, isPro);
@@ -337,8 +342,8 @@ function ChatApp({ user, tier, C, logout }) {
             onMessageSent={handleMessageSent}
           />
         )}
-        {page === "dashboard" && <div style={{ flex: 1, overflow: "auto" }}><DashboardPage sensorData={sensorData} /></div>}
-        {page === "alerts"    && <div style={{ flex: 1, overflow: "auto" }}><AlertsPage alerts={activeAlerts} onGoChat={() => setProPage("chat")} /></div>}
+        {page === "dashboard" && <div style={{ flex: 1, overflow: "auto" }}><DashboardPage sensorData={sensorData} containerId={CONTAINER_ID} /></div>}
+        {page === "alerts"    && <div style={{ flex: 1, overflow: "auto" }}><AlertsPage alerts={allAlerts} onGoChat={() => setProPage("chat")} /></div>}
         {page === "models"    && <div style={{ flex: 1, overflow: "auto" }}><ModelsPage containerId={CONTAINER_ID} /></div>}
       </div>
     </div>

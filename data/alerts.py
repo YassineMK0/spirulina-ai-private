@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS alerts (
 -- are migrated in with ADD COLUMN IF NOT EXISTS rather than the CREATE above.
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS source   TEXT NOT NULL DEFAULT 'rule';
 ALTER TABLE alerts ADD COLUMN IF NOT EXISTS affected TEXT;
+-- Coarse, direction-aware breach signature (e.g. "pH:7,DO:2") -- lets the
+-- frontend tell two genuinely different episodes on the same sensor apart
+-- (a crash vs a spike share the same label in rules.py) without relying on
+-- the free-form LLM-generated message text, which varies wording every call.
+ALTER TABLE alerts ADD COLUMN IF NOT EXISTS detail   TEXT;
 CREATE INDEX IF NOT EXISTS idx_alerts_container
     ON alerts (container_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alerts_user
@@ -61,23 +66,24 @@ class PostgresAlertStore:
         source: str = "rule",
         affected: list[str] | None = None,
         created_at: str | None = None,
+        detail: str | None = None,
     ) -> None:
         conn = self._conn()
         try:
             with conn.cursor() as cur:
                 if created_at:
                     cur.execute(
-                        "INSERT INTO alerts (id, user_id, container_id, message, severity, source, affected, created_at) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        "INSERT INTO alerts (id, user_id, container_id, message, severity, source, affected, created_at, detail) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (str(uuid.uuid4()), user_id, container_id, message, severity,
-                         source, json.dumps(affected or []), created_at),
+                         source, json.dumps(affected or []), created_at, detail),
                     )
                 else:
                     cur.execute(
-                        "INSERT INTO alerts (id, user_id, container_id, message, severity, source, affected) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        "INSERT INTO alerts (id, user_id, container_id, message, severity, source, affected, detail) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                         (str(uuid.uuid4()), user_id, container_id, message, severity,
-                         source, json.dumps(affected or [])),
+                         source, json.dumps(affected or []), detail),
                     )
             conn.commit()
         finally:
@@ -98,6 +104,7 @@ class PostgresAlertStore:
             "created_at":   r[5].isoformat() if r[5] else "",
             "affected":     affected,
             "source":       r[7],
+            "detail":       r[8] or "",
         }
 
     def get_recent(self, container_id: str, limit: int = 10) -> list[dict]:
@@ -106,7 +113,7 @@ class PostgresAlertStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, user_id, container_id, message, severity, created_at, affected, source
+                    SELECT id, user_id, container_id, message, severity, created_at, affected, source, detail
                     FROM alerts
                     WHERE container_id = %s
                     ORDER BY created_at DESC
@@ -124,7 +131,7 @@ class PostgresAlertStore:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, user_id, container_id, message, severity, created_at, affected, source
+                    SELECT id, user_id, container_id, message, severity, created_at, affected, source, detail
                     FROM alerts
                     WHERE user_id = %s
                     ORDER BY created_at DESC
@@ -154,6 +161,7 @@ class InMemoryAlertStore:
         source: str = "rule",
         affected: list[str] | None = None,
         created_at: str | None = None,
+        detail: str | None = None,
     ) -> None:
         self._alerts.append({
             "id":           str(uuid.uuid4()),
@@ -164,6 +172,7 @@ class InMemoryAlertStore:
             "source":       source,
             "affected":     affected or [],
             "created_at":   created_at or datetime.now(timezone.utc).isoformat(),
+            "detail":       detail or "",
         })
         self._alerts = self._alerts[-200:]  # keep last 200
 
