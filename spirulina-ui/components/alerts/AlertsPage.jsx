@@ -1,17 +1,38 @@
 "use client";
 import { useMemo, useState } from "react";
-import { C } from "@/lib/theme";
+import { useTheme } from "@/lib/ThemeContext";
 import { Tag } from "@/components/atoms";
 
+// Friendly, non-technical copy -- an operator shouldn't have to know what
+// "rule engine" or "LOF" means to understand their own tank.
 const SOURCE_LABEL = {
-  rule:         "Threshold Rule",
-  model:        "M1 Model",
-  "rule+model": "Rule + Model",
-  "model-24h":  "24h Pattern Check (LOF)",
+  rule:         "Live Check",
+  model:        "AI Watch",
+  "rule+model": "Confirmed",
+  "model-24h":  "Daily Review",
+};
+
+const SENSOR_LABEL = {
+  pH: "pH Level", EC: "Nutrient Level", DO: "Oxygen Level",
+  temperature: "Temperature", turbidity: "Water Density",
+  status: "Sensor Health", combination_model: "Overall Pattern",
 };
 
 const SEVERITIES = ["critical", "medium", "low"];
 const DEDUP_WINDOW_MS = 3 * 60 * 60 * 1000; // collapse repeats of the same breach within 3h
+
+// Older stored alerts (from before alert text was rewritten to be plain-
+// language) still carry a technical "🚨 CRITICAL — container-01:" prefix and
+// a trailing "_Source: ..._" line baked into the message. New alerts never
+// have either -- severity/source are shown as badges from structured fields
+// instead -- but this keeps historical alerts from looking broken/technical.
+function cleanMessage(text) {
+  if (!text) return "";
+  return text
+    .replace(/^[^\w]*\**\s*(CRITICAL|WARNING|HARVEST)\s*—\s*[\w-]+\**:?\s*\n*/i, "")
+    .replace(/\n*_Source:[^\n]*_\s*$/i, "")
+    .trim();
+}
 
 function groupSignature(a) {
   // `detail` is a coarse, direction-aware breach signature from the backend
@@ -68,12 +89,13 @@ function dayLabel(iso) {
 }
 
 export default function AlertsPage({ alerts = [], onGoChat }) {
+  const { C } = useTheme();
   const [filter, setFilter] = useState("all");
 
-  const palette = {
-    critical: { bg: C.redSoft,   bd: "#4A1010", col: C.red   },
-    medium:   { bg: C.amberSoft, bd: "#4A2808", col: C.amber },
-    low:      { bg: C.card,      bd: C.border,  col: C.green },
+  const SEVERITY_META = {
+    critical: { label: "Urgent",       icon: "🚨", bg: C.redSoft,   bd: "#4A1010", col: C.red   },
+    medium:   { label: "Heads Up",     icon: "⚠️", bg: C.amberSoft, bd: "#4A2808", col: C.amber },
+    low:      { label: "Good to Know", icon: "🌱", bg: C.card,      bd: C.border,  col: C.green },
   };
 
   const timeline = useMemo(() => buildTimeline(alerts), [alerts]);
@@ -100,19 +122,20 @@ export default function AlertsPage({ alerts = [], onGoChat }) {
       <div style={{ display: "flex", gap: 6 }}>
         <FilterChip active={filter === "all"} label="All" count={timeline.length} col={C.text2} onClick={() => setFilter("all")} />
         {SEVERITIES.map((s) => (
-          <FilterChip key={s} active={filter === s} label={s[0].toUpperCase() + s.slice(1)} count={counts[s]} col={palette[s].col} onClick={() => setFilter(s)} />
+          <FilterChip key={s} active={filter === s} label={SEVERITY_META[s].label} count={counts[s]} col={SEVERITY_META[s].col} onClick={() => setFilter(s)} />
         ))}
       </div>
 
       {visible.length === 0 ? (
         <div style={{ color: C.text3, fontFamily: C.mono, fontSize: 11, textAlign: "center", padding: "30px 0" }}>
-          No {filter} alerts.
+          Nothing here.
         </div>
       ) : visible.map((g) => {
-        const p = palette[g.severity] || palette.medium;
+        const meta = SEVERITY_META[g.severity] || SEVERITY_META.medium;
         const day = dayLabel(g.createdAt);
         const showHeader = day !== lastDay;
         lastDay = day;
+        const isLatest = g.id === latestId;
         return (
           <div key={g.id}>
             {showHeader && (
@@ -120,34 +143,60 @@ export default function AlertsPage({ alerts = [], onGoChat }) {
                 {day}
               </div>
             )}
-            <div style={{ background: p.bg, border: `1px solid ${p.bd}`, borderRadius: 11, padding: "13px 14px" }}>
-              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 7 }}>
-                <div style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
-                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: p.col, flexShrink: 0, marginTop: 3, animation: g.id === latestId ? "blink 1.2s infinite" : undefined }} />
-                  <div>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: p.col, marginBottom: 2 }}>
-                      {SOURCE_LABEL[g.source] || SOURCE_LABEL.model} · {g.severity?.toUpperCase()}
+            <div style={{
+              background: meta.bg, border: `1px solid ${meta.bd}`, borderRadius: 14,
+              padding: "16px 16px 13px", boxShadow: isLatest ? `0 0 0 1px ${meta.col}22, 0 4px 18px rgba(0,0,0,0.25)` : "none",
+            }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 11 }}>
+                <div style={{
+                  width: 34, height: 34, borderRadius: 10, flexShrink: 0,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 17, background: `${meta.col}18`,
+                }}>
+                  {meta.icon}
+                </div>
+
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 800, color: meta.col }}>{meta.label}</span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                      {g.count > 1 && <Tag color={meta.col}>×{g.count}</Tag>}
+                      {isLatest && <Tag color={meta.col}>NEW</Tag>}
                     </div>
-                    {g.affected?.length > 0 && (
-                      <div style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>Affected: {g.affected.join(", ")}</div>
+                  </div>
+
+                  <div style={{ fontSize: 13.5, color: C.text, lineHeight: 1.6, fontWeight: 500, marginBottom: 10 }}>
+                    {cleanMessage(g.text)}
+                  </div>
+
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                    {(g.affected || []).map((k) => (
+                      <span key={k} style={{
+                        fontSize: 9.5, fontWeight: 600, color: C.text2, background: C.card2,
+                        border: `1px solid ${C.border}`, borderRadius: 20, padding: "2px 9px",
+                      }}>
+                        {SENSOR_LABEL[k] || k}
+                      </span>
+                    ))}
+                    <span style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono, marginLeft: (g.affected?.length ? 2 : 0) }}>
+                      {SOURCE_LABEL[g.source] || SOURCE_LABEL.model}
+                    </span>
+                    <span style={{ fontSize: 9.5, color: C.text3, fontFamily: C.mono }}>
+                      · {g.count > 1 ? `${g.firstAt}–${g.lastAt}` : g.lastAt}
+                    </span>
+                    {isLatest && (
+                      <button
+                        onClick={() => onGoChat?.(`My container just got this alert: "${cleanMessage(g.text)}" — what should I do?`)}
+                        style={{
+                          marginLeft: "auto", fontSize: 10.5, padding: "5px 13px", borderRadius: 20,
+                          background: meta.col, color: C.bg, border: "none", fontWeight: 700, cursor: "pointer",
+                        }}
+                      >
+                        Ask the assistant →
+                      </button>
                     )}
                   </div>
                 </div>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  {g.count > 1 && <Tag color={p.col}>×{g.count}</Tag>}
-                  <Tag color={g.id === latestId ? C.red : C.green}>{g.id === latestId ? "LATEST" : "PAST"}</Tag>
-                </div>
-              </div>
-              <div style={{ fontSize: 11, color: C.text2, lineHeight: 1.55, marginBottom: 8, paddingLeft: 17 }}>{g.text}</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, paddingLeft: 17 }}>
-                <span style={{ fontSize: 8.5, color: C.text3, fontFamily: C.mono }}>
-                  {g.count > 1 ? `first ${g.firstAt} · last ${g.lastAt}` : g.lastAt}
-                </span>
-                {g.id === latestId && (
-                  <button onClick={onGoChat} style={{ marginLeft: "auto", fontSize: 10, padding: "4px 12px", borderRadius: 20, background: C.redSoft, color: C.red, border: "1px solid #4A1010", fontWeight: 600 }}>
-                    Ask agent →
-                  </button>
-                )}
               </div>
             </div>
           </div>
@@ -158,6 +207,7 @@ export default function AlertsPage({ alerts = [], onGoChat }) {
 }
 
 function FilterChip({ active, label, count, col, onClick }) {
+  const { C } = useTheme();
   return (
     <button
       onClick={onClick}

@@ -1,11 +1,12 @@
 "use client";
 import { useState, useEffect } from "react";
 
-import { C } from "@/lib/theme";
+import { useTheme } from "@/lib/ThemeContext";
 import { Tag, Label } from "@/components/atoms";
 import TrendCharts from "@/components/dashboard/TrendCharts";
 
 const SensorCard = ({ label, val, unit, color, min, max, oMin, oMax, trend, status = "ok" }) => {
+  const { C } = useTheme();
   const pct = Math.min(Math.max(((parseFloat(val) - min) / (max - min)) * 100, 2), 98);
   const oS  = ((oMin - min) / (max - min)) * 100;
   const oW  = ((oMax - oMin) / (max - min)) * 100;
@@ -51,6 +52,7 @@ function useDataAge(timestamp) {
 }
 
 export default function DashboardPage({ sensorData, containerId }) {
+  const { C } = useTheme();
   const s   = sensorData || {};
   const age = useDataAge(s.timestamp);
 

@@ -32,62 +32,81 @@ describe("AlertsPage — alert list", () => {
     expect(screen.getByText("DO recovering.")).toBeInTheDocument();
   });
 
-  it("renders severity in title (uppercase)", () => {
+  it("renders plain-language severity labels, not raw technical words", () => {
     render(<AlertsPage alerts={mockAlerts} />);
-    expect(screen.getByText(/CRITICAL/)).toBeInTheDocument();
-    expect(screen.getByText(/MEDIUM/)).toBeInTheDocument();
-    expect(screen.getByText(/LOW/)).toBeInTheDocument();
+    expect(screen.getByText("Urgent")).toBeInTheDocument();
+    expect(screen.getByText("Heads Up")).toBeInTheDocument();
+    expect(screen.getByText("Good to Know")).toBeInTheDocument();
+    // the raw words "CRITICAL"/"MEDIUM"/"LOW" should not leak into the UI
+    expect(screen.queryByText(/CRITICAL/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^MEDIUM$/)).not.toBeInTheDocument();
   });
 
-  it("renders affected parameters", () => {
+  it("renders affected sensors as friendly names, not raw keys", () => {
     render(<AlertsPage alerts={mockAlerts} />);
-    expect(screen.getByText(/Affected: pH/)).toBeInTheDocument();
-    expect(screen.getByText(/Affected: EC/)).toBeInTheDocument();
+    expect(screen.getByText("pH Level")).toBeInTheDocument();
+    expect(screen.getByText("Nutrient Level")).toBeInTheDocument();
+    expect(screen.getByText("Oxygen Level")).toBeInTheDocument();
   });
 
-  it("renders the detection source instead of a fixed 'M1 Anomaly' label", () => {
+  it("renders a friendly detection-source label instead of internal system names", () => {
     render(<AlertsPage alerts={mockAlerts} />);
-    expect(screen.getByText(/M1 Model · CRITICAL/)).toBeInTheDocument();
-    expect(screen.getByText(/Threshold Rule · MEDIUM/)).toBeInTheDocument();
-    expect(screen.getByText(/Rule \+ Model · LOW/)).toBeInTheDocument();
+    expect(screen.getByText("AI Watch")).toBeInTheDocument();
+    expect(screen.getByText("Live Check")).toBeInTheDocument();
+    expect(screen.getByText("Confirmed")).toBeInTheDocument();
+    expect(screen.queryByText(/Threshold Rule/)).not.toBeInTheDocument();
   });
 
   it("renders timestamps", () => {
     render(<AlertsPage alerts={mockAlerts} />);
-    expect(screen.getByText("10:05")).toBeInTheDocument();
-    expect(screen.getByText("09:30")).toBeInTheDocument();
+    expect(screen.getByText(/10:05/)).toBeInTheDocument();
+    expect(screen.getByText(/09:30/)).toBeInTheDocument();
   });
 });
 
-// ── latest / past tags ────────────────────────────────────────────────────────
+// ── message cleanup ──────────────────────────────────────────────────────────
 
-describe("AlertsPage — LATEST / PAST tags", () => {
-  it("marks the most recent alert (displayed first) as LATEST", () => {
-    render(<AlertsPage alerts={mockAlerts} />);
-    // alerts are displayed newest-first by createdAt — pH (10:05) is most recent
-    expect(screen.getByText("LATEST")).toBeInTheDocument();
-  });
-
-  it("renders PAST tags for older alerts", () => {
-    render(<AlertsPage alerts={mockAlerts} />);
-    const pastTags = screen.getAllByText("PAST");
-    expect(pastTags.length).toBe(2);
+describe("AlertsPage — legacy message cleanup", () => {
+  it("strips an old-format technical prefix/suffix from historical alerts", () => {
+    const legacy = [{
+      id: "9", severity: "critical", affected: ["pH"], source: "rule+model",
+      time: "12:00", createdAt: "2026-01-01T12:00:00Z",
+      text: "🚨 CRITICAL — container-01: pH of 7.0 is too acidic. Add baking soda.\n\n_Source: Threshold rule + M1 predictor (agreed independently)_",
+    }];
+    render(<AlertsPage alerts={legacy} />);
+    expect(screen.getByText("pH of 7.0 is too acidic. Add baking soda.")).toBeInTheDocument();
+    expect(screen.queryByText(/_Source:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/container-01/)).not.toBeInTheDocument();
   });
 });
 
-// ── Ask agent button ──────────────────────────────────────────────────────────
+// ── NEW tag ───────────────────────────────────────────────────────────────────
 
-describe("AlertsPage — Ask agent button", () => {
-  it("shows 'Ask agent' button only for the latest alert", () => {
+describe("AlertsPage — NEW tag", () => {
+  it("marks the most recent alert (by createdAt) as NEW", () => {
     render(<AlertsPage alerts={mockAlerts} />);
-    const buttons = screen.getAllByText(/Ask agent/);
+    expect(screen.getByText("NEW")).toBeInTheDocument();
+  });
+
+  it("does not tag older alerts as NEW", () => {
+    render(<AlertsPage alerts={mockAlerts} />);
+    expect(screen.getAllByText("NEW").length).toBe(1);
+  });
+});
+
+// ── Ask assistant button ─────────────────────────────────────────────────────
+
+describe("AlertsPage — Ask assistant button", () => {
+  it("shows the ask-assistant button only for the most recent alert", () => {
+    render(<AlertsPage alerts={mockAlerts} />);
+    const buttons = screen.getAllByText(/Ask the assistant/);
     expect(buttons.length).toBe(1);
   });
 
-  it("calls onGoChat when 'Ask agent' button is clicked", () => {
+  it("calls onGoChat when the button is clicked", () => {
     const onGoChat = jest.fn();
     render(<AlertsPage alerts={mockAlerts} onGoChat={onGoChat} />);
-    fireEvent.click(screen.getByText(/Ask agent/));
+    fireEvent.click(screen.getByText(/Ask the assistant/));
     expect(onGoChat).toHaveBeenCalledTimes(1);
   });
 });
@@ -95,9 +114,8 @@ describe("AlertsPage — Ask agent button", () => {
 // ── single alert edge case ────────────────────────────────────────────────────
 
 describe("AlertsPage — single alert", () => {
-  it("marks the single alert as LATEST (not PAST)", () => {
+  it("marks the single alert as NEW", () => {
     render(<AlertsPage alerts={[mockAlerts[0]]} />);
-    expect(screen.getByText("LATEST")).toBeInTheDocument();
-    expect(screen.queryByText("PAST")).not.toBeInTheDocument();
+    expect(screen.getByText("NEW")).toBeInTheDocument();
   });
 });

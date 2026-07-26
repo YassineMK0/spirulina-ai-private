@@ -1,18 +1,22 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
-import { C } from "@/lib/theme";
+import { useTheme } from "@/lib/ThemeContext";
 import { Tag, Label, Dot } from "@/components/atoms";
 import { getModelOutputs, predictCPC, predictSpecies } from "@/lib/api";
 
 
-const LiveRow = ({ k, v, color }) => (
-  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-    <span style={{ fontSize: 8.5, color: C.text3, fontFamily: C.mono }}>{k}</span>
-    <span style={{ fontSize: 10, fontWeight: 700, fontFamily: C.mono, color: color || C.text }}>{v}</span>
-  </div>
-);
+const LiveRow = ({ k, v, color }) => {
+  const { C } = useTheme();
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+      <span style={{ fontSize: 8.5, color: C.text3, fontFamily: C.mono }}>{k}</span>
+      <span style={{ fontSize: 10, fontWeight: 700, fontFamily: C.mono, color: color || C.text }}>{v}</span>
+    </div>
+  );
+};
 
 function LiveOutput({ data, error, loading }) {
+  const { C } = useTheme();
   const box = { background: C.card2, border: `1px solid ${C.border2}`, borderRadius: 7, padding: "10px 12px" };
   if (loading)  return <div style={{ ...box, color: C.text3, fontFamily: C.mono, fontSize: 9 }}>Running…</div>;
   if (error)    return <div style={{ ...box, border: "1px solid #4A1010", color: C.red, fontFamily: C.mono, fontSize: 9 }}>{error}</div>;
@@ -22,6 +26,7 @@ function LiveOutput({ data, error, loading }) {
 
 /* ── CPC Image Predictor card ─────────────────────────────────────────────── */
 function CPCPredictorCard() {
+  const { C } = useTheme();
   const [file,     setFile]     = useState(null);
   const [preview,  setPreview]  = useState(null);
   const [loading,  setLoading]  = useState(false);
@@ -243,6 +248,7 @@ function CPCPredictorCard() {
 
 /* ── Species Classifier card ──────────────────────────────────────────────── */
 function SpeciesClassifierCard() {
+  const { C } = useTheme();
   const [file,     setFile]     = useState(null);
   const [preview,  setPreview]  = useState(null);
   const [loading,  setLoading]  = useState(false);
@@ -464,6 +470,7 @@ function SpeciesClassifierCard() {
 
 /* ── Page ─────────────────────────────────────────────────────────────────── */
 export default function ModelsPage({ containerId }) {
+  const { C } = useTheme();
   const [outputs, setOutputs] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastRun, setLastRun] = useState(null);

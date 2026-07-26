@@ -13,6 +13,8 @@ export default function AgentChat({
   incomingAlerts      = [],
   onConversationCreated,
   onMessageSent,
+  pendingQuestion     = null,
+  onPendingQuestionConsumed,
 }) {
   const { C } = useTheme();
   const [messages,   setMessages]   = useState([]);
@@ -57,9 +59,17 @@ export default function AgentChat({
   /* Auto-scroll */
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, thinking]);
 
+  /* "Ask the assistant" from the Alerts page -- fire instantly, no typing */
+  useEffect(() => {
+    if (!pendingQuestion?.text) return;
+    send(pendingQuestion.text);
+    onPendingQuestionConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingQuestion?.id]);
+
   /* Send */
-  const send = async () => {
-    const text = input.trim();
+  const send = async (overrideText) => {
+    const text = (overrideText ?? input).trim();
     if (!text || thinking) return;
     const t = now();
     setMessages((m) => [...m, { id: idRef.current++, role: "user", text, time: t }]);

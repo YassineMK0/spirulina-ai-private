@@ -253,6 +253,15 @@ function useChatState(userId, isPro) {
   const handleConvCreated  = useCallback(async (id) => { setActiveConvId(id); await refreshConversations(); }, [refreshConversations]);
   const handleMessageSent  = useCallback(async () => { await refreshConversations(); }, [refreshConversations]);
 
+  // Jumps to chat and fires the question immediately -- no "type it yourself"
+  // step -- from the Alerts page's "Ask the assistant" button. `id` forces
+  // the AgentChat effect to re-fire even if the same alert is asked twice.
+  const [pendingQuestion, setPendingQuestion] = useState(null);
+  const handleAskAboutAlert = (question) => {
+    setPendingQuestion({ text: question, id: Date.now() });
+    if (isPro) setProPage("chat");
+  };
+
   const activeAlerts = allAlerts.filter((a) => a.severity === "critical" || a.severity === "medium");
 
   return {
@@ -262,6 +271,7 @@ function useChatState(userId, isPro) {
     sensorData,
     handleNewChat, handleSelectConv, handleDeleteConv,
     handleConvCreated, handleMessageSent,
+    pendingQuestion, setPendingQuestion, handleAskAboutAlert,
   };
 }
 
@@ -298,6 +308,7 @@ function ChatApp({ user, tier, C, logout }) {
     chatAlerts, allAlerts, activeAlerts, sensorData,
     handleNewChat, handleSelectConv, handleDeleteConv,
     handleConvCreated, handleMessageSent,
+    pendingQuestion, setPendingQuestion, handleAskAboutAlert,
   } = useChatState(user.id, isPro);
 
   const page = isPro ? proPage : "chat";
@@ -340,10 +351,12 @@ function ChatApp({ user, tier, C, logout }) {
             incomingAlerts={chatAlerts}
             onConversationCreated={handleConvCreated}
             onMessageSent={handleMessageSent}
+            pendingQuestion={pendingQuestion}
+            onPendingQuestionConsumed={() => setPendingQuestion(null)}
           />
         )}
         {page === "dashboard" && <div style={{ flex: 1, overflow: "auto" }}><DashboardPage sensorData={sensorData} containerId={CONTAINER_ID} /></div>}
-        {page === "alerts"    && <div style={{ flex: 1, overflow: "auto" }}><AlertsPage alerts={allAlerts} onGoChat={() => setProPage("chat")} /></div>}
+        {page === "alerts"    && <div style={{ flex: 1, overflow: "auto" }}><AlertsPage alerts={allAlerts} onGoChat={handleAskAboutAlert} /></div>}
         {page === "models"    && <div style={{ flex: 1, overflow: "auto" }}><ModelsPage containerId={CONTAINER_ID} /></div>}
       </div>
     </div>
