@@ -7,9 +7,9 @@ trained on the Chong et al. 2025 dataset (9450 images, 3 species),
 repo). For a spirulina farm, a prediction other than Spirulina_Platensis is
 a contamination signal.
 
-Model files: set env var SPECIES_MODEL_DIR to override the default Windows
-path (the folder containing xgboost_model.joblib, scaler.joblib,
-label_encoder.joblib, feature_names.joblib).
+Model files: bundled in this package under artifacts/ (xgboost_model.joblib,
+scaler.joblib, label_encoder.joblib, feature_names.joblib). Set env var
+SPECIES_MODEL_DIR to override (e.g. to point at a newer/retrained set).
 """
 
 from __future__ import annotations
@@ -23,9 +23,7 @@ import numpy as np
 
 from .features import extract_features
 
-_DEFAULT_DIR = Path(
-    r"G:\classification 5aza\Scope_3_Microalgae_shape_texture_convolution_classification-main\trained_models"
-)
+_DEFAULT_DIR = Path(__file__).parent / "artifacts"
 _CALIBRATION_PATH = Path(__file__).parent / "artifacts" / "raw_feature_stats.joblib"
 _TARGET_SPECIES = "Spirulina_Platensis"
 

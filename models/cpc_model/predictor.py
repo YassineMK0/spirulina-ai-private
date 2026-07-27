@@ -10,7 +10,8 @@ Preprocessing (must match training exactly):
 
 Training-data CPC range: 0.076 – 0.446 mg/mL (random-split R²=0.988).
 
-Model file: set env var CPC_MODEL_PATH to override the default Windows path.
+Model file: bundled in this package under artifacts/. Set env var
+CPC_MODEL_PATH to override (e.g. to point at a newer checkpoint).
 """
 
 from __future__ import annotations
@@ -23,9 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-_DEFAULT_PATH = Path(
-    r"G:\cpc detection\second and third\biomass_cpc_model_random_split.pt"
-)
+_DEFAULT_PATH = Path(__file__).parent / "artifacts" / "biomass_cpc_model_random_split.pt"
 _CPC_RANGE = (0.076, 0.446)  # mg/mL — training data bounds
 
 

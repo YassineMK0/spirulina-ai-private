@@ -15,15 +15,24 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture(scope="module")
 def client():
-    """TestClient with lifespan replaced by a no-op (no MQTT, no scheduler)."""
+    """TestClient with lifespan replaced by a no-op (no MQTT, no scheduler).
+
+    All protected routes now depend on api.auth.require_auth. Overriding it
+    here (rather than crafting real JWTs per test) authenticates every
+    request as user "user1" — matching the user_id already used throughout
+    this file's conversation/chat tests — while still letting individual
+    tests override it again to check the 401/403 paths explicitly."""
     @asynccontextmanager
     async def _noop_lifespan(app):
         yield
 
     from api.main import app
+    from api.auth import require_auth
     app.router.lifespan_context = _noop_lifespan
+    app.dependency_overrides[require_auth] = lambda: {"sub": "user1", "email": "user1@test.com", "tier": "free"}
     with TestClient(app) as c:
         yield c
+    app.dependency_overrides.clear()
 
 
 # ── /health ────────────────────────────────────────────────────────────────────
@@ -238,3 +247,78 @@ class TestModels:
             res = client.get("/models/container-01")
         assert res.status_code == 200
         assert res.json()["m1"] == ml
+
+
+# ── Auth enforcement ─────────────────────────────────────────────────────────
+# Regression tests for the 2026-07-27 fix: require_auth/require_admin were
+# defined in api/auth.py but never wired into api/main.py's routes, so any
+# caller could read/write any user's data by just naming a user_id. The
+# `client` fixture overrides require_auth to always succeed as "user1" (so
+# every other test above stays green); these tests remove that override for
+# one request at a time to prove the real dependency is actually in effect.
+
+class TestAuthEnforcement:
+    def test_chat_requires_auth(self, client):
+        from api.main import app
+        from api.auth import require_auth
+        saved = app.dependency_overrides.pop(require_auth)
+        try:
+            res = client.post("/chat", json={"message": "hi"})
+        finally:
+            app.dependency_overrides[require_auth] = saved
+        assert res.status_code == 401
+
+    def test_conversations_rejects_unauthenticated(self, client):
+        from api.main import app
+        from api.auth import require_auth
+        saved = app.dependency_overrides.pop(require_auth)
+        try:
+            res = client.get("/conversations/user1")
+        finally:
+            app.dependency_overrides[require_auth] = saved
+        assert res.status_code == 401
+
+    def test_conversations_rejects_another_users_id(self, client):
+        # client fixture authenticates as "user1" -- fetching "user2"'s
+        # conversations must be forbidden, not silently served.
+        res = client.get("/conversations/user2")
+        assert res.status_code == 403
+
+    def test_alert_history_rejects_another_users_id(self, client):
+        res = client.get("/alerts/user2/history")
+        assert res.status_code == 403
+
+    def test_sensors_requires_auth(self, client):
+        from api.main import app
+        from api.auth import require_auth
+        saved = app.dependency_overrides.pop(require_auth)
+        try:
+            res = client.get("/sensors/container-01")
+        finally:
+            app.dependency_overrides[require_auth] = saved
+        assert res.status_code == 401
+
+    def test_status_requires_admin_not_just_login(self, client):
+        # require_admin decodes the token itself rather than going through a
+        # Depends(require_auth) sub-dependency, so it must be overridden
+        # separately from require_auth to simulate "logged in, wrong tier".
+        from fastapi import HTTPException
+        from api.main import app
+        from api.auth import require_admin
+
+        def _free_tier_denied():
+            raise HTTPException(status_code=403, detail="Admin access required")
+
+        app.dependency_overrides[require_admin] = _free_tier_denied
+        try:
+            res = client.get("/status")
+        finally:
+            app.dependency_overrides.pop(require_admin, None)
+        assert res.status_code == 403
+
+    def test_debug_endpoint_requires_admin(self, client):
+        # No auth override at all here -- confirms the route is locked down
+        # by default (401 missing-token, the floor every admin route falls
+        # back to) rather than silently open like it was before the fix.
+        res = client.post("/debug/run-combination-check/container-01")
+        assert res.status_code in (401, 403)

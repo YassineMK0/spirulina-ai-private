@@ -253,14 +253,52 @@ def _run_ml_prediction(container_id: str) -> dict:
         return {}
 
 
-# Who actually caught the anomaly -- shown verbatim in every alert so it's
-# never ambiguous whether a fast threshold rule or the ML predictor fired.
-_SOURCE_LABEL = {
-    "rule":       "Threshold rule",
-    "model":      "M1 predictor (rule engine + seasonal ML, run every 15 min)",
-    "rule+model": "Threshold rule + M1 predictor (agreed independently)",
-    "model-24h":  "M1 predictor -- 24h pattern check (LOF, runs once/day)",
+# Plain-language fallback copy for when the LLM is unavailable -- keyed by
+# (breach key, direction). Direction is "low"/"high" for the three channels
+# where rules.py has both a low and a high rule; the others only ever fire
+# one way, so they're keyed by "" (see _direction).
+_FRIENDLY_CENTER = {"pH": 10.0, "EC": 18500.0, "temperature": 36.0}
+
+_FRIENDLY_BREACH: dict[tuple[str, str], tuple[str, str]] = {
+    ("pH", "low"):        ("the pH has dropped too low, which is too acidic for healthy spirulina",
+                            "add a pinch of baking soda (sodium bicarbonate) to bring it back up"),
+    ("pH", "high"):       ("the pH has climbed too high",
+                            "add a little food-grade acid to bring it back down"),
+    ("EC", "low"):        ("the nutrient level in the water is too low, likely diluted",
+                            "add more nutrient mix to restore the balance"),
+    ("EC", "high"):       ("the nutrient level in the water is too concentrated",
+                            "dilute with some fresh water"),
+    ("temperature", "low"):  ("the water is too cold for healthy growth",
+                               "check the heater or warm the water gently"),
+    ("temperature", "high"): ("the water is too hot",
+                               "check the heater and consider adding cooler water"),
+    ("DO", ""):           ("oxygen levels in the water are dangerously low",
+                            "increase aeration or mixing right away"),
+    ("turbidity", ""):    ("the culture has grown dense and looks ready to harvest",
+                            "go ahead and harvest a portion soon"),
+    ("status", ""):       ("one of the sensors isn't reporting properly",
+                            "check that sensor's wiring and connection"),
+    ("combination_model", ""): ("today's overall readings look a bit different from this tank's usual pattern",
+                                 "nothing urgent, but worth a quick look"),
 }
+
+
+def _direction(key: str, value) -> str:
+    center = _FRIENDLY_CENTER.get(key)
+    if center is None or not isinstance(value, (int, float)):
+        return ""
+    return "low" if value < center else "high"
+
+
+def _friendly_breach_text(b: dict) -> tuple[str, str]:
+    """(what's wrong, what to do) in plain language, no jargon -- used when
+    the LLM is unavailable so the fallback never reads like a lab report."""
+    direction = _direction(b["key"], b["value"])
+    return (
+        _FRIENDLY_BREACH.get((b["key"], direction))
+        or _FRIENDLY_BREACH.get((b["key"], ""))
+        or (b["label"], "check on it soon")
+    )
 
 
 def generate_alert_text(
@@ -272,16 +310,15 @@ def generate_alert_text(
 ) -> str:
     """Generate a short plain-language alert from the reasoning LLM.
 
-    Falls back to a template-based message if the LLM call fails. Either way,
-    the returned text always ends with an explicit "Source:" line stating
-    whether a threshold rule or the ML predictor (or both) fired -- see
-    _SOURCE_LABEL -- so that's never left to the LLM to get right or to a
-    frontend badge alone to convey.
+    Falls back to a friendly template-based message if the LLM call fails.
+    The returned text is pure explanation -- no severity/emoji/container
+    prefix and no "Source:" suffix, since the frontend already renders
+    severity and source as separate badges from structured fields (not by
+    parsing this string). Written for a grower with no chemistry
+    background: no "threshold", "breach", or internal system names.
     """
     if not breaches:
         return ""
-
-    source_line = f"\n\n_Source: {_SOURCE_LABEL.get(source, source)}_"
 
     # Build a compact breach summary for the prompt -- prefer the rule's own
     # detail string (exact values + threshold baked in by rules.py) when
@@ -291,16 +328,6 @@ def generate_alert_text(
         return f"- {b['label'].upper()}: {detail}"
 
     breach_lines = "\n".join(_breach_line(b) for b in breaches)
-    severity = max(
-        (b["severity"] for b in breaches),
-        key=lambda s: {"harvest": 0, "warning": 1, "critical": 2}[s],
-    )
-    emoji = _SEVERITY_EMOJI[severity]
-
-    # Upgrade severity if ML model says critical
-    if ml_result and ml_result.get("severity") == "critical" and severity != "critical":
-        severity = "critical"
-        emoji = _SEVERITY_EMOJI["critical"]
 
     # Current sensor readings for context
     _sensor_keys = ("pH", "EC", "DO", "temperature", "turbidity", "luminosity")
@@ -358,22 +385,19 @@ def generate_alert_text(
             f"these and nothing else):\n{breach_lines}\n"
             f"{ml_lines}"
             f"{guard}\n"
-            f"You are an expert spirulina cultivation assistant (AlgaePool protocol, Dominique Delobel, June 2026).\n"
-            f"Answer in exactly 3 sentences:\n"
-            f"1. Name the specific problem using ONLY the triggered alerts above, with their exact values "
-            f"(e.g. 'pH of 7.0 indicates Chlorella contamination or CO2 over-injection', "
-            f"'temperature of 42 C signals heater malfunction', "
-            f"'DO of 2.5 mg/L means oxygen depletion from bacterial bloom'). "
-            f"Do not reference a sensor reading that isn't listed as a triggered alert.\n"
-            f"2. State the one action the operator must take RIGHT NOW (be specific — "
-            f"e.g. 'add NaHCO3 to raise pH', 'shut off heater and add cold water', "
-            f"'increase aeration to emergency level', or for an equipment fault, 'inspect the sensor "
-            f"and its wiring/connection').\n"
-            f"3. State what happens if untreated within 2 hours (be direct about culture loss, or "
-            f"about losing visibility into the culture if it's an equipment fault).\n"
-            f"Start with '{emoji} {severity.upper()} — {container_id}:' then give sentence 1, 2, 3.\n"
-            f"Do NOT repeat the threshold table. Use the exact values from the triggered alerts only. "
-            f"Do NOT state which system detected this — that line is appended automatically."
+            f"You are explaining a water-quality alert to a spirulina grower who has NO chemistry "
+            f"or engineering background -- talk to them like a knowledgeable friend, not a lab report.\n"
+            f"Answer in exactly 2 short, warm, plain-language sentences:\n"
+            f"1. What's wrong, in plain words, using the actual number "
+            f"(e.g. 'Your water's pH has dropped to 7.0, which is too acidic for healthy spirulina' -- "
+            f"NOT 'pH threshold breach' or any technical/system language).\n"
+            f"2. The one specific thing to do right now "
+            f"(e.g. 'Add a pinch of baking soda to bring the pH back up', "
+            f"'Check the heater and add some cool water', "
+            f"or for an equipment fault, 'Check that sensor's wiring and connection').\n"
+            f"Never use the words 'threshold', 'breach', 'critical range', 'anomaly', or the name of "
+            f"any detection system. Do not include an emoji, severity label, or the container name -- "
+            f"those are shown separately. Just the two plain sentences."
         )
 
         text = reasoning_generate(
@@ -382,19 +406,18 @@ def generate_alert_text(
             history=[],
             sensor_state=sensor,
         )
-        return text.strip() + source_line
+        return text.strip()
 
     except Exception:
-        # No LLM available -- still state exactly which rule(s)/detector fired
-        # and why, using the same detail strings the LLM prompt would've used,
-        # instead of a contentless generic message.
-        finding_lines = "\n".join(f"- {b['label']}: {b.get('detail', b['value'])}" for b in breaches)
-        return (
-            f"{emoji} **{severity.upper()} — {container_id}**\n\n"
-            f"{finding_lines}\n\n"
-            f"Take immediate corrective action."
-            f"{source_line}"
-        )
+        # No LLM available -- a plain-language, jargon-free explanation built
+        # from a fixed phrasing table (see _FRIENDLY_BREACH) rather than the
+        # raw rule-engine labels/details, which are French and technical
+        # (e.g. "pH hors plage critique ... seuil critique <8.5 ou >11.5").
+        parts = [_friendly_breach_text(b) for b in breaches]
+        whats = "; ".join(w for w, _ in parts)
+        actions = list(dict.fromkeys(a for _, a in parts))  # dedup repeated advice
+        whats = whats[0].upper() + whats[1:] if whats else whats
+        return f"{whats}. {' Also, '.join(actions)}."
 
 
 # ---------------------------------------------------------------------------

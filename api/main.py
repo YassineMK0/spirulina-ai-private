@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Header, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -174,15 +175,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SpirulinaAI", version="2.0.0", lifespan=lifespan)
 
+# CORS_ALLOWED_ORIGINS: comma-separated list, e.g. "https://app.example.com".
+# Unset (default) keeps the wide-open "*" this app has always run with, so
+# local/dev setups aren't broken by this — lock it down via env var in prod.
+_cors_origins_env = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["POST", "GET", "DELETE", "PATCH"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
 
-from api.auth  import router as auth_router
+from api.auth  import router as auth_router, require_auth, require_admin, decode_token
 from api.admin import router as admin_router
 app.include_router(auth_router)
 app.include_router(admin_router)
@@ -238,7 +245,7 @@ def health():
 
 
 @app.get("/containers")
-def list_containers():
+def list_containers(auth: dict = Depends(require_auth)):
     """List known container IDs — live MQTT cache + DB history, deduplicated."""
     from agent.sensors import _cache
     from data.store import sensor_store
@@ -248,7 +255,7 @@ def list_containers():
 
 
 @app.get("/status")
-def status():
+def status(auth: dict = Depends(require_admin)):
     """Diagnostic endpoint — shows active monitor sessions and SSE connections."""
     from agent.monitor import get_active_sessions
     from agent.sensors import get_sensor_reading, _cache
@@ -263,11 +270,12 @@ def status():
 
 
 @app.post("/debug/run-combination-check/{container_id}")
-def debug_run_combination_check(container_id: str):
+def debug_run_combination_check(container_id: str, auth: dict = Depends(require_admin)):
     """Manually trigger the combination-model (LOF) check for one container,
     instead of waiting for its 00:05 daily cron tick. Dev/testing only --
     pairs with `python agent/sensors.py --backfill-24h` to seed enough
-    history, then this fires the scoring immediately."""
+    history, then this fires the scoring immediately. Admin-only: this runs
+    real model inference and DB writes on demand."""
     from agent.monitor import register_session, run_combination_model_check, _build_daily_context
 
     register_session(f"debug-{container_id}", container_id)
@@ -285,24 +293,33 @@ def debug_run_combination_check(container_id: str):
 # Conversation CRUD
 # ---------------------------------------------------------------------------
 
+def _require_self(auth: dict, user_id: str) -> None:
+    """A logged-in user may only touch their own user_id-scoped resources."""
+    if auth.get("sub") != user_id:
+        raise HTTPException(status_code=403, detail="Cannot access another user's data")
+
+
 @app.get("/conversations/{user_id}")
-def list_conversations(user_id: str):
+def list_conversations(user_id: str, auth: dict = Depends(require_auth)):
     """Return all conversations for a user, newest first."""
+    _require_self(auth, user_id)
     from data.conversations import conversation_store
     return conversation_store.list_conversations(user_id)
 
 
 @app.post("/conversations/{user_id}", status_code=201)
-def create_conversation(user_id: str, body: ConversationCreate):
+def create_conversation(user_id: str, body: ConversationCreate, auth: dict = Depends(require_auth)):
     """Explicitly create a new conversation (title can be set later)."""
+    _require_self(auth, user_id)
     from data.conversations import conversation_store
     cid = conversation_store.create_conversation(user_id, body.title)
     return {"id": cid, "title": body.title}
 
 
 @app.get("/conversations/{user_id}/{conv_id}")
-def get_conversation_messages(user_id: str, conv_id: str):
+def get_conversation_messages(user_id: str, conv_id: str, auth: dict = Depends(require_auth)):
     """Return the message list for one conversation."""
+    _require_self(auth, user_id)
     from data.conversations import conversation_store
     if not conversation_store.conversation_exists(conv_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -310,14 +327,16 @@ def get_conversation_messages(user_id: str, conv_id: str):
 
 
 @app.delete("/conversations/{user_id}/{conv_id}")
-def delete_conversation(user_id: str, conv_id: str):
+def delete_conversation(user_id: str, conv_id: str, auth: dict = Depends(require_auth)):
+    _require_self(auth, user_id)
     from data.conversations import conversation_store
     conversation_store.delete_conversation(conv_id)
     return {"status": "deleted"}
 
 
 @app.patch("/conversations/{user_id}/{conv_id}/title")
-def rename_conversation(user_id: str, conv_id: str, body: TitleUpdate):
+def rename_conversation(user_id: str, conv_id: str, body: TitleUpdate, auth: dict = Depends(require_auth)):
+    _require_self(auth, user_id)
     from data.conversations import conversation_store
     conversation_store.update_title(conv_id, body.title)
     return {"status": "updated", "title": body.title}
@@ -331,20 +350,24 @@ FREE_TIER_LIMIT = 3  # max messages for free-tier users
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def chat(req: ChatRequest, auth: dict = Depends(require_auth)):
     from data.conversations import conversation_store, make_title
     from data.users import user_store
     from agent.monitor import register_session
 
-    register_session(req.user_id, req.container_id)
+    # The token's sub is the only trustworthy identity -- req.user_id is
+    # client-supplied and used only for the (now-redundant) request schema.
+    user_id = auth["sub"]
+
+    register_session(user_id, req.container_id)
 
     # ── Resolve actual tier from DB (don't trust client-sent tier) ──────────
-    db_user    = user_store.get_by_id(req.user_id)
+    db_user    = user_store.get_by_id(user_id)
     actual_tier = db_user["tier"] if db_user else req.tier
 
     # ── Enforce free-tier message quota ─────────────────────────────────────
     if actual_tier == "free":
-        used = user_store.count_messages(req.user_id)
+        used = user_store.count_messages(user_id)
         if used >= FREE_TIER_LIMIT:
             raise HTTPException(
                 status_code=429,
@@ -360,7 +383,7 @@ def chat(req: ChatRequest):
 
     if not conv_id or not conversation_store.conversation_exists(conv_id):
         title   = make_title(req.message)
-        conv_id = conversation_store.create_conversation(req.user_id, title)
+        conv_id = conversation_store.create_conversation(user_id, title)
         is_new  = True
 
     # ── Load history and append user message ────────────────────────────────
@@ -370,7 +393,7 @@ def chat(req: ChatRequest):
 
     # ── Run LangGraph pipeline ───────────────────────────────────────────────
     result = _get_graph().invoke({
-        "user_id":      req.user_id,
+        "user_id":      user_id,
         "container_id": req.container_id,
         "tier":         actual_tier,
         "chat_history": history,
@@ -404,7 +427,7 @@ def chat(req: ChatRequest):
 # ---------------------------------------------------------------------------
 
 @app.get("/sensors/{container_id}")
-def get_sensors(container_id: str):
+def get_sensors(container_id: str, auth: dict = Depends(require_auth)):
     from agent.sensors import get_sensor_reading
 
     # get_sensor_reading() already falls back to the DB when the MQTT cache
@@ -415,7 +438,7 @@ def get_sensors(container_id: str):
 
 
 @app.get("/sensors/{container_id}/history")
-def get_sensor_history(container_id: str, days: int = 14):
+def get_sensor_history(container_id: str, days: int = 14, auth: dict = Depends(require_auth)):
     from datetime import datetime, timedelta, timezone
 
     from data.store import sensor_store
@@ -426,7 +449,7 @@ def get_sensor_history(container_id: str, days: int = 14):
 
 
 @app.get("/models/{container_id}")
-def get_model_outputs(container_id: str):
+def get_model_outputs(container_id: str, auth: dict = Depends(require_auth)):
     """M1 anomaly detector output -- the only ML model in the pipeline
     (rule engine + seasonal check). The combination model (LOF) layer isn't
     included here -- it's a 24h-cadence signal scored by its own cron job
@@ -444,8 +467,11 @@ def get_model_outputs(container_id: str):
 # CPC image prediction
 # ---------------------------------------------------------------------------
 
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
 @app.post("/cpc/predict")
-async def cpc_predict(file: UploadFile = File(...)):
+async def cpc_predict(file: UploadFile = File(...), auth: dict = Depends(require_auth)):
     """Predict CPC concentration (mg/mL) from a spirulina image.
 
     Accepts any common image format (JPEG, PNG, BMP …).
@@ -456,6 +482,8 @@ async def cpc_predict(file: UploadFile = File(...)):
     image_bytes = await file.read()
     if not image_bytes:
         raise HTTPException(status_code=400, detail="empty file")
+    if len(image_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
 
     try:
         predictor = CPCPredictor.load()
@@ -467,7 +495,7 @@ async def cpc_predict(file: UploadFile = File(...)):
 
 
 @app.post("/species/predict")
-async def species_predict(file: UploadFile = File(...)):
+async def species_predict(file: UploadFile = File(...), auth: dict = Depends(require_auth)):
     """Classify a microalgae image as Chlamydomonas_Reinhardtii,
     Chlorella_FSP, or Spirulina_Platensis -- a non-Spirulina_Platensis
     result is a contamination signal.
@@ -480,6 +508,8 @@ async def species_predict(file: UploadFile = File(...)):
     image_bytes = await file.read()
     if not image_bytes:
         raise HTTPException(status_code=400, detail="empty file")
+    if len(image_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
 
     try:
         predictor = SpeciesClassifier.load()
@@ -495,11 +525,12 @@ async def species_predict(file: UploadFile = File(...)):
 # ---------------------------------------------------------------------------
 
 @app.get("/alerts/{user_id}/history")
-def alert_history(user_id: str, limit: int = 50):
+def alert_history(user_id: str, limit: int = 50, auth: dict = Depends(require_auth)):
     """Persisted alert history for a user, newest first -- classified by
     severity/source/affected sensors (see data/alerts.py). Used to hydrate
     the Alerts page on load so a refresh doesn't lose everything that only
     arrived over the live SSE stream previously."""
+    _require_self(auth, user_id)
     from data.alerts import alert_store
     rows = alert_store.get_recent_for_user(user_id, limit)
     # DB rows store monitor.py's severity vocabulary (critical/warning/harvest);
@@ -510,7 +541,16 @@ def alert_history(user_id: str, limit: int = 50):
 
 
 @app.get("/alerts/{user_id}")
-async def alerts_sse(user_id: str, container_id: str = ""):
+async def alerts_sse(user_id: str, container_id: str = "", token: str = ""):
+    # EventSource can't send an Authorization header, so the frontend passes
+    # the token as a query param (see lib/api.js connectAlerts) -- verify it
+    # the same way require_auth would, just from a different location.
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+    payload = decode_token(token)
+    if payload.get("sub") != user_id:
+        raise HTTPException(status_code=403, detail="Cannot access another user's alerts")
+
     if container_id:
         from agent.monitor import register_session
         register_session(user_id, container_id)

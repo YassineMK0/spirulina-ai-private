@@ -136,7 +136,10 @@ class TestCPCEndpoint:
     def client(self):
         from fastapi.testclient import TestClient
         from api.main import app
-        return TestClient(app)
+        from api.auth import require_auth
+        app.dependency_overrides[require_auth] = lambda: {"sub": "user1", "email": "user1@test.com", "tier": "free"}
+        yield TestClient(app)
+        app.dependency_overrides.clear()
 
     def test_cpc_predict_returns_200(self, client):
         image_bytes = _make_image_bytes()
